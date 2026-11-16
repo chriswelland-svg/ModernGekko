@@ -504,6 +504,52 @@ fs::path VendorDolphinRoot(const char* argv0)
   return fs::path(MODERNGEKKO_SOURCE_DIR) / "vendor" / "dolphin";
 }
 
+// Dispatch pruning. DolRecomp emits a `case` for every guest instruction in a
+// chunk, which makes every label reachable from an indirect jump, so GCC must
+// assume any of them can be entered and keeps the whole guest register file in
+// memory: measured on the shipped module at 6 host instructions per ALU op, 14
+// per load, 30 per store, 35 per guest instruction. Naming only the addresses
+// the chassis can really dispatch to turns the rest into ordinary C labels and
+// lets the compiler allocate registers across them.
+//
+// The entry set has to cover everything the player's disc dispatches to, so it
+// ships as one union across all captured regions and the prune always passes
+// --default-fallback: a missing case must fall through to the interpreter
+// rather than spin on an unchanged pc (the 16 fps crater of 2026-11-07).
+//
+// Both files live in module-template/, which every packager already copies
+// recursively and VendorDolphinRoot() already resolves, so no packaging change
+// is needed. The entry set is hashed into the cache identity so widening it
+// invalidates cached modules exactly like the other codegen knobs do.
+struct PruneAssets {
+  fs::path script;
+  fs::path entries;
+  bool available = false;
+  std::string identity = "pruned=0";
+};
+
+PruneAssets FindPruneAssets(const char* argv0)
+{
+  PruneAssets assets;
+  const fs::path root = VendorDolphinRoot(argv0) / "module-template";
+  std::error_code ec;
+  assets.script = root / "prune_dispatch.py";
+  assets.entries = root / "entries.txt";
+  if (!fs::is_regular_file(assets.script, ec) || !fs::is_regular_file(assets.entries, ec))
+    return assets;
+  std::ifstream in(assets.entries, std::ios::binary);
+  std::ostringstream buffered;
+  buffered << in.rdbuf();
+  const std::string content = buffered.str();
+  if (content.empty())
+    return assets;
+  assets.available = true;
+  std::ostringstream id;
+  id << "pruned=" << std::hex << Fnv1a(content);
+  assets.identity = id.str();
+  return assets;
+}
+
 std::string DolRecompCodegenIdentity()
 {
   constexpr std::array<const char*, 8> names = {
@@ -798,6 +844,11 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   const std::string chain_calls =
       (chain_env != nullptr && chain_env[0] != '\0') ? std::string(chain_env) : std::string("1");
 
+  // Resolved before the identity is built so a module generated with pruning
+  // can never be served to a run that will not prune (or the reverse), and so
+  // a widened entry set retires the modules built against the old one.
+  const PruneAssets prune = FindPruneAssets(argv0);
+
   const std::string identity = std::string(RECOMPCORE_REVISION) + "|dolrecomp=" +
       std::string(DOLRECOMP_REVISION) + "|module-abi=" +
       std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|cpu-abi=" +
@@ -806,7 +857,7 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
       (options.state_in_memory ? std::string("|state_in_memory=1") : std::string()) +
       "|patches=" + patches.fingerprint + "|dolrecomp_binary=" +
       *dolrecomp_hash + "|" + moderngekko::pgo::PgoCacheIdentity(options.pgo) +
-      DolRecompCodegenIdentity() + "|chain_calls=" + chain_calls;
+      DolRecompCodegenIdentity() + "|chain_calls=" + chain_calls + "|" + prune.identity;
   std::ostringstream key_tail;
   key_tail << std::hex << std::setfill('0') << std::setw(16) << Fnv1a(identity);
   const std::string cache_key = game.dol_sha256 + "-" + key_tail.str();
@@ -929,6 +980,47 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   }
   else
     std::ofstream{normalized_smc};
+
+  // Prune the dispatch switches before a single chunk is compiled. Pruning is
+  // a one-way rewrite of the generated sources, so it has to happen here --
+  // after dolrecomp, before the module build -- and never against a tree that
+  // already carries profile data (a stale profile is a silent 6 % regression,
+  // see PERFORMANCE.md).
+  if (prune.available)
+  {
+    const fs::path chunks = generated / "chunks";
+    std::error_code prune_ec;
+    if (!fs::is_directory(chunks, prune_ec))
+    {
+      std::cerr << "dispatch pruning: no chunk sources at " << chunks << '\n';
+      return std::nullopt;
+    }
+    // The bundled interpreter is passed to CMake as Python3_EXECUTABLE; when it
+    // is not configured, fall back to whatever is on PATH. Windows has no
+    // `python3` shim, hence the platform split.
+    const std::string python =
+        !options.python.empty()
+            ? options.python
+            : std::string(
+#if defined(_WIN32)
+                  "python"
+#else
+                  "python3"
+#endif
+              );
+    const std::string prune_command = Quote(python) + " " + Quote(prune.script) + " " +
+                                      Quote(chunks) + " --entry-extra " +
+                                      Quote(prune.entries) + " --default-fallback";
+    std::cout << "pruning dispatch switches with " << prune.entries.filename().string() << '\n';
+    if (!RunCommand(prune_command))
+    {
+      // Refuse rather than carry on: the cache identity already claims this
+      // module is pruned, so an unpruned tree here would be recorded as the
+      // real thing and quietly cost every later run.
+      std::cerr << "dispatch pruning failed; not building an unpruned module\n";
+      return std::nullopt;
+    }
+  }
 
   const unsigned compile_jobs = std::max(1u, std::thread::hardware_concurrency());
   // CMake embeds these paths in build.ninja without quoting: hand it the 8.3
