@@ -788,6 +788,16 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
       pgo_compile_flags += " -Werror=profile-instr-out-of-date";
   }
 
+  // Call chaining is a codegen choice gated inside DolRecomp's pipeline.c, so
+  // the effective value has to be part of the cache key: otherwise a module
+  // generated with chaining could be served to a run that asked for the safe
+  // unchained form, or the reverse. Defaults to on -- this runtime installs no
+  // host-call hooks, so there is nothing a mod could intercept behind the
+  // chassis, which is the one case chaining must not cover (PERFORMANCE.md).
+  const char* chain_env = std::getenv("DOLRECOMP_CHAIN_CALLS");
+  const std::string chain_calls =
+      (chain_env != nullptr && chain_env[0] != '\0') ? std::string(chain_env) : std::string("1");
+
   const std::string identity = std::string(RECOMPCORE_REVISION) + "|dolrecomp=" +
       std::string(DOLRECOMP_REVISION) + "|module-abi=" +
       std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|cpu-abi=" +
@@ -796,7 +806,7 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
       (options.state_in_memory ? std::string("|state_in_memory=1") : std::string()) +
       "|patches=" + patches.fingerprint + "|dolrecomp_binary=" +
       *dolrecomp_hash + "|" + moderngekko::pgo::PgoCacheIdentity(options.pgo) +
-      DolRecompCodegenIdentity();
+      DolRecompCodegenIdentity() + "|chain_calls=" + chain_calls;
   std::ostringstream key_tail;
   key_tail << std::hex << std::setfill('0') << std::setw(16) << Fnv1a(identity);
   const std::string cache_key = game.dol_sha256 + "-" + key_tail.str();
@@ -859,6 +869,10 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   }
   const fs::path generated_parent = artifact / "dolrecomp-output";
   ScopedEnvironment recompiler_environment;
+  // Hand the gate to the recompiler. An inherited value (a player exporting
+  // DOLRECOMP_CHAIN_CALLS=0) is written back unchanged, so opting out still
+  // works and the cache key above already recorded which form was chosen.
+  recompiler_environment.Set("DOLRECOMP_CHAIN_CALLS", chain_calls);
   if (options.backend == "llvm")
   {
     if (options.pgo.mode == moderngekko::pgo::PgoMode::Generate)
