@@ -558,10 +558,35 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
                     "$<TARGET_FILE_DIR:moderngekko-run>/Sys/GameSettings/${_moderngekko_settings_name}")
     endif()
 
+    # Ship the community gamepad database compiled into the launcher rather
+    # than as a file beside it. A data file has to be copied by every packager,
+    # and one that is not copied is a silent "controller not recognized" on a
+    # player's machine -- the failure mode we are trying to remove. SDL reads
+    # SDL_HINT_GAMECONTROLLERCONFIG while initialising the gamepad subsystem
+    # and splits it on newlines (SDL_LoadGamepadHints), so the whole file goes
+    # in as one string and must be set before SDL_Init(SDL_INIT_GAMEPAD).
+    #
+    # The file is LF-only; \r is stripped anyway because a CRLF checkout would
+    # otherwise leave the carriage return inside the GUID and every mapping
+    # would silently fail to parse.
+    set(_moderngekko_gcpad_db "${CMAKE_CURRENT_SOURCE_DIR}/data/gamecontrollerdb.txt")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_moderngekko_gcpad_db}")
+    file(READ "${_moderngekko_gcpad_db}" _moderngekko_gcpad_db_text)
+    string(REPLACE "\r" "" _moderngekko_gcpad_db_text "${_moderngekko_gcpad_db_text}")
+    string(REGEX REPLACE "[ \t\n]+$" "" _moderngekko_gcpad_db_text "${_moderngekko_gcpad_db_text}")
+    string(REPLACE "\\" "\\\\" _moderngekko_gcpad_db_text "${_moderngekko_gcpad_db_text}")
+    string(REPLACE "\"" "\\\"" _moderngekko_gcpad_db_text "${_moderngekko_gcpad_db_text}")
+    string(REPLACE "\n" "\\n\"\n\"" _moderngekko_gcpad_db_text "${_moderngekko_gcpad_db_text}")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/gamecontrollerdb_gen.c"
+        "/* generated from data/gamecontrollerdb.txt -- do not edit */\n"
+        "const char moderngekko_gamecontrollerdb[] =\n\""
+        "${_moderngekko_gcpad_db_text}\";\n")
+
     add_executable(moderngekko-launcher
         tools/moderngekko_launcher.cpp
         tools/frontend_config.cpp
         tools/dol_patch.cpp
+        "${CMAKE_CURRENT_BINARY_DIR}/gamecontrollerdb_gen.c"
         vendor/dolphin/Externals/imgui/imgui/backends/imgui_impl_sdl3.cpp
         vendor/dolphin/Externals/imgui/imgui/backends/imgui_impl_sdlrenderer3.cpp)
     target_include_directories(moderngekko-launcher PRIVATE

@@ -9,6 +9,12 @@
 #include "DiscIO/Volume.h"
 
 #include <SDL3/SDL.h>
+
+// Community gamepad mappings, generated into gamecontrollerdb_gen.c from
+// data/gamecontrollerdb.txt (see CMakeLists). C linkage; the definition is a
+// single string that SDL splits on newlines when it loads the hint.
+extern "C" const char moderngekko_gamecontrollerdb[];
+
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlrenderer3.h>
@@ -1102,6 +1108,13 @@ int main(int argc, char** argv)
   SDL_SetAppMetadata(MODERNGEKKO_FRONTEND_NAME, MODERNGEKKO_FRONTEND_VERSION,
                      MODERNGEKKO_APP_ID);
   SDL_setenv_unsafe("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", "1", 0);
+  // Community gamepad mappings, compiled in from data/gamecontrollerdb.txt
+  // (see CMakeLists). SDL loads this hint while initialising the gamepad
+  // subsystem and splits it on newlines, so it must be set before SDL_Init.
+  // It takes the mapping table from 272 to 765 entries, which is the
+  // difference between "No SDL gamepad detected" and a first-run card that
+  // finds a pad SDL 3.4.4's built-in copy does not know about.
+  SDL_SetHint(SDL_HINT_GAMECONTROLLERCONFIG, moderngekko_gamecontrollerdb);
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD))
     return 1;
 
