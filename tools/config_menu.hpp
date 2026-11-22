@@ -50,6 +50,9 @@ public:
     ConfigResult *config = nullptr;
     std::string game_name;
     std::string disc_id;
+    // SHA-256 of the running main.dol: gameplay options that patch game code
+    // are only offered for the exact build they were written against.
+    std::string dol_sha256;
     std::string module_path;
     // Where the disc that is running was extracted from, and where the
     // executable lives. The System tab's region combo needs both: the first to
@@ -101,6 +104,7 @@ private:
   void DrawTexturesTab();
   void DrawStatesTab();
   void DrawCheatsTab();
+  void DrawGameplayTab();
   void DrawSystemTab();
   // One row of the System tab's region combo: the disc id, its human label
   // ("NTSC-U"), and where its game root and recompiled module live. Either
@@ -286,5 +290,14 @@ private:
   unsigned m_fps_frames = 0;
   double m_fps = 0.0;
 };
+
+// Plug a standard controller into every GameCube port that has an input
+// device assigned (port 1 always) and unplug ports that have none. Dolphin
+// only plugs port 1 by default, so before this a pad picked for ports 2-4 was
+// bound but the game saw "no controller" there. Applies live while the game
+// runs (the core swaps the device at its next SI poll). Special devices set by
+// hand in Dolphin.ini (GBA, bongos, ...) are left alone, and netplay owns the
+// ports while it runs.
+void ApplyControllerPorts(const std::vector<std::string> &ports);
 
 } // namespace moderngekko::frontend

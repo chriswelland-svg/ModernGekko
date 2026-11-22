@@ -3,6 +3,7 @@
 #include "frontend_config.hpp"
 #include "dol_patch.hpp"
 #include "moderngekko/game.hpp"
+#include "moderngekko/game_tweaks.hpp"
 #include "moderngekko/runtime.hpp"
 #include "netplay_session.hpp"
 
@@ -532,6 +533,13 @@ int RunMain(int argc, char **argv) {
   // through Config::AreCheatsEnabled(), so it has to be set before Run().
   Config::SetBaseOrCurrent(Config::MAIN_ENABLE_CHEATS,
                            frontend_config.enable_cheats);
+  // Gameplay options (F1 > Gameplay); the runtime attached their code at
+  // Create() when this game build supports them.
+  moderngekko::tweaks::SetNeutralBallMarker(frontend_config.neutral_ball_marker);
+  // Plug a GameCube controller into each port that has a device assigned, so
+  // ports 2-4 reach the game. Netplay assigns the ports itself.
+  if (!netplay_role)
+    moderngekko::frontend::ApplyControllerPorts(frontend_config.controllers);
   std::cerr << "[run] config: language=" << frontend_config.language
             << " aspect=" << frontend_config.aspect_ratio
             << " widescreen=" << (frontend_config.widescreen_hack ? 1 : 0)
@@ -549,6 +557,7 @@ int RunMain(int argc, char **argv) {
         created.runtime->GetGameMetadata();
     hooks.game_name = metadata.game_name;
     hooks.disc_id = metadata.disc_id;
+    hooks.dol_sha256 = metadata.dol_sha256;
     hooks.module_path = created.runtime->GetConfig().module.path.string();
     // The System tab's region combo needs both: the running disc's extraction
     // to find its siblings, and the executable's directory to find a module

@@ -70,6 +70,9 @@ struct ConfigResult {
   // Which codes are on lives in Dolphin's own GameSettings/<ID>.ini, so the
   // per-code state travels with the game id instead of this file.
   bool enable_cheats = false;
+  // [Gameplay] Beach Spikers (USA): grey ball landing marker when both players
+  // on the receiving team are human (see moderngekko/game_tweaks.hpp).
+  bool neutral_ball_marker = false;
   std::string netplay_nickname = "Player";
   std::string netplay_address = "127.0.0.1";
   std::uint16_t netplay_port = 2626;

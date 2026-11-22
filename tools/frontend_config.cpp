@@ -216,6 +216,9 @@ ConfigResult LoadConfig(const fs::path &user_directory,
     } else if (key == "enable_cheats") {
       if (!ParseBoolean(value, &config.enable_cheats))
         return {.error = "enable_cheats must be true or false"};
+    } else if (key == "neutral_ball_marker") {
+      if (!ParseBoolean(value, &config.neutral_ball_marker))
+        return {.error = "neutral_ball_marker must be true or false"};
     } else if (key == "state_slot") {
       int slot = 0;
       const auto parsed = std::from_chars(
@@ -396,7 +399,10 @@ bool SaveConfig(const fs::path &user_directory, const ConfigResult &config,
        << "[Audio]\n"
        << "audio_backend=" << config.audio_backend << '\n'
        << "volume=" << config.volume << '\n'
-       << "mute=" << (config.mute ? "true" : "false") << '\n';
+       << "mute=" << (config.mute ? "true" : "false") << '\n'
+       << "[Gameplay]\n"
+       << "neutral_ball_marker="
+       << (config.neutral_ball_marker ? "true" : "false") << '\n';
   // Its own section: it is a build setting, and the [Input] block below is a
   // list of controllerN= keys. Omitted entirely when nothing was chosen, so a
   // default install's config stays the documented set.

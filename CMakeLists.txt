@@ -201,6 +201,7 @@ add_library(moderngekko_legacy STATIC
     src/runtime/module_loader.cpp
     src/runtime/mod_loader.cpp
     src/runtime/game.cpp
+    src/runtime/game_tweaks.cpp
     src/runtime/legacy_runtime.cpp
     src/timing/event_scheduler.cpp
     vendor/dolphin_legacy/Core/Boot/BootMemory.cpp
@@ -215,6 +216,7 @@ add_library(moderngekko STATIC
     src/runtime/module_loader.cpp
     src/runtime/mod_loader.cpp
     src/runtime/game.cpp
+    src/runtime/game_tweaks.cpp
 )
 add_library(ModernGekko::Runtime ALIAS moderngekko)
 

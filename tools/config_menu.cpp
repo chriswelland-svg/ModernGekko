@@ -1,6 +1,7 @@
 #include "config_menu.hpp"
 
 #include "moderngekko/game.hpp"
+#include "moderngekko/game_tweaks.hpp"
 #include "moderngekko/hotkey.hpp"
 #include "moderngekko/runtime.hpp"
 #include "moderngekko/window.hpp"
@@ -19,6 +20,9 @@
 #include "Core/Core.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/ProcessorInterface.h"
+#include "Core/HW/SI/SI.h"
+#include "Core/HW/SI/SI_Device.h"
+#include "Core/NetPlay/NetPlayProto.h"
 #include "Core/State.h"
 #include "Core/System.h"
 #include "InputCommon/ControllerInterface/ControllerInterface.h"
@@ -1166,6 +1170,12 @@ void ConfigMenu::Draw() {
       DrawCheatsTab();
       ImGui::EndTabItem();
     }
+    const bool gameplay_open = ImGui::BeginTabItem("Gameplay");
+    LogItemRect("tab", "Gameplay");
+    if (gameplay_open) {
+      DrawGameplayTab();
+      ImGui::EndTabItem();
+    }
     const bool system_open = ImGui::BeginTabItem("System");
     LogItemRect("tab", "System");
     if (system_open) {
@@ -1460,6 +1470,9 @@ void ConfigMenu::ApplyControllerLive() {
   // it the pad keeps the CommandGroup references it built at boot.
   if (Pad::IsInitialized())
     Pad::LoadConfig();
+  // And plug the matching GameCube ports in (or out), so a pad picked for
+  // port 2-4 shows up in the game's player-entry screen.
+  ApplyControllerPorts(cfg.controllers);
   m_applied_ports = m_ports;
   RefreshDevices();
   std::string live_pad = "(pad not initialized)";
@@ -2497,6 +2510,61 @@ void ConfigMenu::ApplyCheatsLive() {
                written ? "" : " (write failed)");
   if (!written)
     SetStatus("couldn't write " + path);
+}
+
+void ApplyControllerPorts(const std::vector<std::string> &ports) {
+  if (NetPlay::IsNetPlayRunning())
+    return;
+  auto &system = Core::System::GetInstance();
+  const bool running = Core::IsRunning(system);
+  for (int port = 0; port < 4; ++port) {
+    const bool assigned =
+        port == 0 || (static_cast<std::size_t>(port) < ports.size() &&
+                      !ports[static_cast<std::size_t>(port)].empty());
+    const auto &info = Config::GetInfoForSIDevice(port);
+    const SerialInterface::SIDevices current = Config::Get(info);
+    SerialInterface::SIDevices wanted = current;
+    if (assigned && current == SerialInterface::SIDEVICE_NONE)
+      wanted = SerialInterface::SIDEVICE_GC_CONTROLLER;
+    else if (!assigned && current == SerialInterface::SIDEVICE_GC_CONTROLLER)
+      wanted = SerialInterface::SIDEVICE_NONE;
+    if (wanted == current)
+      continue;
+    Config::SetBaseOrCurrent(info, wanted);
+    if (running)
+      system.GetSerialInterface().ChangeDevice(wanted, port);
+    std::fprintf(stderr, "[input] GameCube port %d: %s\n", port + 1,
+                 wanted == SerialInterface::SIDEVICE_NONE ? "unplugged"
+                                                          : "controller plugged in");
+  }
+}
+
+void ConfigMenu::DrawGameplayTab() {
+  ConfigResult &cfg = *m_hooks.config;
+  if (!moderngekko::tweaks::SupportsNeutralBallMarker(m_hooks.disc_id,
+                                                      m_hooks.dol_sha256)) {
+    ImGui::TextWrapped("No gameplay options for this game or region yet.");
+    return;
+  }
+  ImGui::TextDisabled("Multiplayer");
+  ImGui::Spacing();
+  if (ImGui::Checkbox("Neutral ball marker for human teams",
+                      &cfg.neutral_ball_marker)) {
+    moderngekko::tweaks::SetNeutralBallMarker(cfg.neutral_ball_marker);
+    Save("config");
+    SetStatus(cfg.neutral_ball_marker
+                  ? "neutral ball marker on: two-human teams decide who takes the ball"
+                  : "neutral ball marker off: the marker shows the player the game picks");
+  }
+  LogItemRect("widget", "neutral-ball-marker");
+  ImGui::Spacing();
+  ImGui::TextWrapped(
+      "When both players on a team are human, the marker where the ball will "
+      "land is drawn in neutral grey instead of the colour of the player the "
+      "game picked, so the two of you decide who goes for it. The 1P/2P "
+      "arrows still show who is who. Teams with a COM partner keep the "
+      "coloured marker, so you can still see whether your partner will take "
+      "the ball. Applies immediately.");
 }
 
 void ConfigMenu::DrawCheatsTab() {

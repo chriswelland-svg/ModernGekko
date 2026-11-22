@@ -32,6 +32,7 @@
 #include "moderngekko/hotkey.hpp"
 #include "moderngekko/window.hpp"
 #include "moderngekko/mod_loader.hpp"
+#include "moderngekko/game_tweaks.hpp"
 #include "moderngekko/module_loader.hpp"
 
 #include <algorithm>
@@ -670,8 +671,24 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   impl->title =
       impl->config.window_title.value_or(impl->metadata.game_name);
   impl->mods = std::make_unique<ModManager>();
-  const ModLoadReport mod_report = impl->mods->LoadDirectories(
-      impl->config.mod_directories, impl->metadata.disc_id);
+  std::vector<ModLoadIssue> discovery_issues;
+  std::vector<ModSource> mod_sources =
+      DiscoverModSources(impl->config.mod_directories, &discovery_issues);
+  // A broken Mods directory loads none of its packages (as before)...
+  if (!discovery_issues.empty())
+    mod_sources.clear();
+  // ...but the built-in gameplay options for this exact game build (F1 >
+  // Gameplay) always load. They are attached whether or not an option is on,
+  // so it can be switched live; switched off, the game's own code runs.
+  // MODERNGEKKO_NO_BUILTIN_TWEAKS=1 leaves them out (troubleshooting, A/B).
+  const char *no_tweaks = std::getenv("MODERNGEKKO_NO_BUILTIN_TWEAKS");
+  if (!(no_tweaks && no_tweaks[0] && no_tweaks[0] != '0'))
+    if (const ModernGekkoModDesc *tweaks = moderngekko::tweaks::BuiltinTweaksFor(
+            impl->metadata.disc_id, impl->metadata.dol_sha256))
+      mod_sources.push_back(ModSource::AttachedDescriptor(tweaks, "builtin"));
+  ModLoadReport mod_report = impl->mods->Load(mod_sources, impl->metadata.disc_id);
+  mod_report.issues.insert(mod_report.issues.begin(), discovery_issues.begin(),
+                           discovery_issues.end());
   for (const ModLoadIssue &issue : mod_report.issues)
     std::fprintf(stderr, "mod rejected: %s: %s\n", issue.source.c_str(),
                  issue.message.c_str());
