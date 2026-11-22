@@ -1,5 +1,5 @@
 [submodule "vendor/dolphin"]
 	path = vendor/dolphin
-	url = https://github.com/kobayashi90/RecompCore.git
-	branch = beach-spikers-x11-mouse
+	url = https://github.com/chriswelland-svg/RecompCore.git
+	branch = beach-spikers-us-entries
 	shallow = true
