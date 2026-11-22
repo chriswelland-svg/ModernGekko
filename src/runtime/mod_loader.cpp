@@ -126,7 +126,31 @@ struct ModManager::Impl {
   std::unordered_map<std::string, Mod *> mods_by_id;
   std::unordered_map<std::string, ModernGekkoModFunction> exports;
   std::unordered_map<std::uint32_t, ModernGekkoModFunction> patches;
+  // Patches registered MODERNGEKKO_MOD_PATCH_INDIRECT: dispatched like any
+  // other, but they do not make their chunk fall back (see HandlesRange).
+  std::unordered_set<std::uint32_t> indirect_patches;
   std::unordered_map<std::uint32_t, Hooks> hooks;
+  // One bit per (address >> 2) & 8191 of every patched or hooked address.
+  // HandlesAddress runs once per native dispatch while any mod intercepts, so
+  // nearly every address has to be rejected without two hash lookups: that
+  // probe cost ~8% of the frame time with just four patches installed.
+  std::array<std::uint64_t, 128> intercept_filter{};
+  static unsigned FilterBit(std::uint32_t address) { return (address >> 2) & 8191u; }
+  void RebuildInterceptFilter() {
+    intercept_filter.fill(0);
+    const auto set = [this](std::uint32_t address) {
+      const unsigned bit = FilterBit(address);
+      intercept_filter[bit >> 6] |= std::uint64_t{1} << (bit & 63u);
+    };
+    for (const auto &entry : patches)
+      set(entry.first);
+    for (const auto &entry : hooks)
+      set(entry.first);
+  }
+  bool MayIntercept(std::uint32_t address) const {
+    const unsigned bit = FilterBit(address);
+    return ((intercept_filter[bit >> 6] >> (bit & 63u)) & 1u) != 0u;
+  }
   std::unordered_map<std::string, std::vector<ModernGekkoModFunction>>
       callbacks;
   std::vector<ModernGekkoModFunction *> import_slots;
@@ -397,7 +421,8 @@ ModLoadReport ModManager::Load(const std::vector<ModSource> &sources,
     for (std::uint32_t i = 0; i < desc->num_patches; ++i) {
       const auto &patch = desc->patches[i];
       if ((patch.address & 3u) != 0u || !patch.function ||
-          (patch.flags & ~MODERNGEKKO_MOD_PATCH_FORCE) != 0u) {
+          (patch.flags & ~(MODERNGEKKO_MOD_PATCH_FORCE |
+                           MODERNGEKKO_MOD_PATCH_INDIRECT)) != 0u) {
         issue(mod->source, "invalid patch");
         continue;
       }
@@ -409,6 +434,10 @@ ModLoadReport ModManager::Load(const std::vector<ModSource> &sources,
         continue;
       }
       m_impl->patches[patch.address] = patch.function;
+      if ((patch.flags & MODERNGEKKO_MOD_PATCH_INDIRECT) != 0u)
+        m_impl->indirect_patches.insert(patch.address);
+      else
+        m_impl->indirect_patches.erase(patch.address);
     }
     for (std::uint32_t i = 0; i < desc->num_hooks; ++i) {
       const auto &hook = desc->hooks[i];
@@ -468,6 +497,7 @@ ModLoadReport ModManager::Load(const std::vector<ModSource> &sources,
       desc->on_load(&m_impl->host_api);
     mod->loaded = true;
   }
+  m_impl->RebuildInterceptFilter();
   ++m_impl->interception_generation;
   report.loaded = m_impl->loaded;
   return report;
@@ -551,6 +581,8 @@ void ModManager::Unload() {
   m_impl->callbacks.clear();
   m_impl->hooks.clear();
   m_impl->patches.clear();
+  m_impl->indirect_patches.clear();
+  m_impl->intercept_filter.fill(0);
   m_impl->exports.clear();
   m_impl->mods_by_id.clear();
   m_impl->loaded.clear();
@@ -585,6 +617,10 @@ bool ModManager::Dispatch(CPUState *state, std::uint32_t address) {
   // address, so this is on the emulation hot path.
   if (m_impl->hooks.empty() && m_impl->patches.empty() &&
       m_impl->pending_returns.empty())
+    return false;
+  // Same fast reject as HandlesAddress: generated code calls into here for
+  // every block it dispatches, so a miss must not cost two hash lookups.
+  if (!m_impl->MayIntercept(address))
     return false;
   const auto hooks = m_impl->hooks.find(address);
   if (hooks != m_impl->hooks.end()) {
@@ -636,6 +672,8 @@ const std::vector<LoadedModInfo> &ModManager::GetLoadedMods() const {
 }
 
 bool ModManager::HandlesAddress(std::uint32_t address) const {
+  if (m_impl->pending_returns.empty() && !m_impl->MayIntercept(address))
+    return false;
   if (m_impl->patches.empty() && m_impl->hooks.empty() &&
       m_impl->pending_returns.empty())
     return false;
@@ -653,7 +691,12 @@ bool ModManager::HandlesRange(std::uint32_t start, std::uint32_t end) const {
   const auto inside = [start, end](const auto &entry) {
     return entry.first >= start && entry.first < end;
   };
-  if (std::ranges::any_of(m_impl->patches, inside) ||
+  // An indirect-only patch is reached through the chassis no matter how its
+  // chunk runs, so it does not need the chunk on the fallback CPU.
+  const auto direct_patch_inside = [&](const auto &entry) {
+    return inside(entry) && !m_impl->indirect_patches.contains(entry.first);
+  };
+  if (std::ranges::any_of(m_impl->patches, direct_patch_inside) ||
       std::ranges::any_of(m_impl->hooks, inside))
     return true;
   return std::ranges::any_of(

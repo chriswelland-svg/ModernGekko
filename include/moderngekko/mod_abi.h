@@ -32,7 +32,14 @@ typedef void (*ModernGekkoModFunction)(CPUState* state);
 typedef enum ModernGekkoModPatchFlags
 {
     MODERNGEKKO_MOD_PATCH_NONE = 0,
-    MODERNGEKKO_MOD_PATCH_FORCE = 1
+    MODERNGEKKO_MOD_PATCH_FORCE = 1,
+    /* The patched function is only ever reached through an indirect call
+       (a function pointer: bctrl/bcctr), never a direct `bl`. Indirect calls
+       always return to the chassis, so the patch fires without forcing the
+       whole module chunk that contains the address onto the fallback CPU.
+       Only use it when no direct branch to the address exists: a direct call
+       from inside the same chunk would skip the patch. */
+    MODERNGEKKO_MOD_PATCH_INDIRECT = 2
 } ModernGekkoModPatchFlags;
 
 typedef enum ModernGekkoModHookKind
@@ -131,6 +138,8 @@ typedef const ModernGekkoModDesc* (*ModernGekkoGetModFn)(void);
     { (address), (function), MODERNGEKKO_MOD_PATCH_NONE }
 #define RECOMP_FORCE_PATCH(address, function) \
     { (address), (function), MODERNGEKKO_MOD_PATCH_FORCE }
+#define RECOMP_INDIRECT_PATCH(address, function) \
+    { (address), (function), MODERNGEKKO_MOD_PATCH_INDIRECT }
 #define RECOMP_HOOK(address, function) \
     { (address), (function), MODERNGEKKO_MOD_HOOK_ENTRY }
 #define RECOMP_HOOK_RETURN(address, function) \
