@@ -14,6 +14,8 @@
 #include "Core/HW/GCPad.h"
 #include "VideoCommon/VideoConfig.h"
 
+#include <SDL3/SDL_hints.h>
+
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -187,7 +189,19 @@ std::filesystem::path ExecutableDirectory(const char *argv0) {
 }
 } // namespace
 
+// Community gamepad mappings, generated into gamecontrollerdb_gen.c from
+// data/gamecontrollerdb.txt (see CMakeLists) -- the same table the launcher
+// loads. C linkage; the definition is a C translation unit.
+extern "C" const char moderngekko_gamecontrollerdb[];
+
 int RunMain(int argc, char **argv) {
+  // Must precede SDL_Init(SDL_INIT_GAMEPAD) in Dolphin's SDL backend. Without
+  // it, pads known only to the community database are raw joysticks in game
+  // (different name, numbered inputs) while the launcher configured them as
+  // gamepads, so their profile never matched a device. Set as a hint, not an
+  // environment variable: the table is far larger than Windows' 32 KiB
+  // per-variable limit.
+  SDL_SetHint(SDL_HINT_GAMECONTROLLERCONFIG, moderngekko_gamecontrollerdb);
 #if defined(_WIN32)
   if (!std::getenv("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD"))
     _putenv_s("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", "1");

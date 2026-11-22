@@ -547,8 +547,8 @@ bool GenerateControllerConfig(const fs::path &user_directory,
     }
     // The menu registers a gamepad bindings provider that walks the real
     // device and writes input names matching the backend actually in use
-    // (evdev on this build). Without a provider (netplay/launcher paths)
-    // fall back to the SDL gamecontroller labels below.
+    // (SDL, XInput, WGInput, raw joystick or evdev). Without a provider
+    // (netplay/launcher paths) fall back to the SDL gamecontroller labels below.
     if (s_gamepad_bindings) {
       const std::string bindings = s_gamepad_bindings(controllers[i]);
       if (bindings.empty()) {
@@ -561,12 +561,30 @@ bool GenerateControllerConfig(const fs::path &user_directory,
       output << bindings;
       continue;
     }
+    // Launcher path (no provider): the spec is "SDL/<n>/<name>". Match the
+    // menu's layout rule so a pad behaves the same whichever path configured
+    // it: Nintendo-labelled pads (not GameCube pads, whose A already sits on
+    // the south position) bind GC A/B/X/Y to the printed labels.
+    std::string lower_spec = controllers[i];
+    std::transform(lower_spec.begin(), lower_spec.end(), lower_spec.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool gamecube_pad = lower_spec.find("gamecube") != std::string::npos ||
+                              lower_spec.find("game cube") != std::string::npos;
+    const bool nintendo_labels =
+        !gamecube_pad && (lower_spec.find("nintendo") != std::string::npos ||
+                          lower_spec.find("switch") != std::string::npos ||
+                          lower_spec.find("joy-con") != std::string::npos ||
+                          lower_spec.find("joycon") != std::string::npos);
     output << "Device = " << controllers[i] << '\n'
-           << "Buttons/A = `Button A`\n"
-              "Buttons/B = `Button B`\n"
-              "Buttons/X = `Button X`\n"
-              "Buttons/Y = `Button Y`\n"
-              "Buttons/Z = `Shoulder R`\n"
+           << (nintendo_labels ? "Buttons/A = `Button E`\n"
+                                 "Buttons/B = `Button S`\n"
+                                 "Buttons/X = `Button N`\n"
+                                 "Buttons/Y = `Button W`\n"
+                               : "Buttons/A = `Button A`\n"
+                                 "Buttons/B = `Button B`\n"
+                                 "Buttons/X = `Button X`\n"
+                                 "Buttons/Y = `Button Y`\n")
+           << "Buttons/Z = `Shoulder R`\n"
               "Buttons/Start = Start\n"
               "Main Stick/Up = `Left Y+`\n"
               "Main Stick/Down = `Left Y-`\n"

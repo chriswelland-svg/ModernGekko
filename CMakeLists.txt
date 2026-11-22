@@ -581,6 +581,13 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         "/* generated from data/gamecontrollerdb.txt -- do not edit */\n"
         "const char moderngekko_gamecontrollerdb[] =\n\""
         "${_moderngekko_gcpad_db_text}\";\n")
+    # The runner needs the same mappings: a pad SDL only recognises through
+    # this database is a gamepad in the launcher, so the launcher writes a
+    # profile for "SDL/<n>/<database name>". Without the database the runner's
+    # SDL backend sees the same pad as a raw joystick under a different name,
+    # and the profile binds nothing in game.
+    target_sources(moderngekko-run PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/gamecontrollerdb_gen.c")
 
     add_executable(moderngekko-launcher
         tools/moderngekko_launcher.cpp

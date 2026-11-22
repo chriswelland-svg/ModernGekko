@@ -40,6 +40,7 @@
 #include <cfloat>
 #include <charconv>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -260,16 +261,206 @@ std::string ProvideKeyboardPadBindings(std::string_view spec) {
   return out;
 }
 
+// GameCube pads (official/third-party adapters, the Switch 2 GameCube pad)
+// already arrive with GC A on the bottom position: SDL's GameCube mapping puts
+// a:b0 (GC A) on SOUTH. They must never get the Nintendo label swap below,
+// even though their names start with "Nintendo".
+bool IsGameCubePad(const std::string &lower_name) {
+  return lower_name.find("gamecube") != std::string::npos ||
+         lower_name.find("game cube") != std::string::npos;
+}
+
+// Nintendo-labelled pads (Switch Pro, Joy-Con, NSO pads) print A on the east
+// button and B on the south one.
+bool HasNintendoLabels(const std::string &lower_name) {
+  if (IsGameCubePad(lower_name))
+    return false;
+  return lower_name.find("nintendo") != std::string::npos ||
+         lower_name.find("switch") != std::string::npos ||
+         lower_name.find("joy-con") != std::string::npos ||
+         lower_name.find("joycon") != std::string::npos;
+}
+
+// Binding block for devices whose inputs Dolphin names itself, identically on
+// every OS: SDL gamepads ("Button S/E/W/N", "Shoulder R", "Trigger L",
+// "Left X+", "Pad N", "Start", rumble "Motor L/R"), XInput ("Button A/B/X/Y",
+// same axis/trigger/pad names) and Windows.Gaming.Input ("Bumper R" instead of
+// "Shoulder R", "Menu" as well as "Start"). This is the path every pad takes on
+// Windows and macOS, and the one the launcher's first-run picker produces on
+// Linux ("SDL/<n>/<name>"). SDL names face buttons by position (Button S =
+// bottom); XInput/WGInput name them by Xbox label, which is the same position.
+// SDL already inverts its vertical axes to the XInput convention, so
+// "Left Y+" is up on all three.
+std::string NamedGamepadBindings(const ciface::Core::Device &device,
+                                 const std::set<std::string> &names,
+                                 bool nintendo_labels) {
+  const auto has = [&names](const char *name) { return names.count(name) != 0; };
+  std::string out = "Device = " + device.GetQualifiedName() + "\n";
+  const auto bind = [&out, &has](const char *control,
+                                 std::initializer_list<const char *> candidates) {
+    for (const char *candidate : candidates) {
+      if (has(candidate)) {
+        out += control;
+        out += " = `";
+        out += candidate;
+        out += "`\n";
+        return;
+      }
+    }
+  };
+
+  if (nintendo_labels) {
+    bind("Buttons/A", {"Button E", "Button A"});
+    bind("Buttons/B", {"Button S", "Button B"});
+    bind("Buttons/X", {"Button N", "Button X"});
+    bind("Buttons/Y", {"Button W", "Button Y"});
+  } else {
+    bind("Buttons/A", {"Button S", "Button A"});
+    bind("Buttons/B", {"Button E", "Button B"});
+    bind("Buttons/X", {"Button W", "Button X"});
+    bind("Buttons/Y", {"Button N", "Button Y"});
+  }
+  bind("Buttons/Z", {"Shoulder R", "Bumper R"});
+  bind("Buttons/Start", {"Start", "Menu"});
+
+  bind("Main Stick/Up", {"Left Y+"});
+  bind("Main Stick/Down", {"Left Y-"});
+  bind("Main Stick/Left", {"Left X-"});
+  bind("Main Stick/Right", {"Left X+"});
+  bind("C-Stick/Up", {"Right Y+"});
+  bind("C-Stick/Down", {"Right Y-"});
+  bind("C-Stick/Left", {"Right X-"});
+  bind("C-Stick/Right", {"Right X+"});
+
+  // Triggers are always axes on these backends (digital ZL/ZR on a Switch pad
+  // report 0 or full scale), so the analog axis serves both the GC trigger
+  // click and its analog travel.
+  bind("Triggers/L", {"Trigger L"});
+  bind("Triggers/R", {"Trigger R"});
+  bind("Triggers/L-Analog", {"Trigger L"});
+  bind("Triggers/R-Analog", {"Trigger R"});
+
+  bind("D-Pad/Up", {"Pad N"});
+  bind("D-Pad/Down", {"Pad S"});
+  bind("D-Pad/Left", {"Pad W"});
+  bind("D-Pad/Right", {"Pad E"});
+
+  std::set<std::string> outputs;
+  for (const auto *output : device.Outputs())
+    outputs.insert(output->GetName());
+  if (outputs.count("Motor L") && outputs.count("Motor R"))
+    out += "Rumble/Motor = `Motor L` | `Motor R`\n";
+  else if (outputs.count("Strong") && outputs.count("Weak"))
+    out += "Rumble/Motor = `Strong` | `Weak`\n";
+
+  out += "Main Stick/Calibration = 100.00\n";
+  out += "C-Stick/Calibration = 100.00\n";
+  return out;
+}
+
+// Raw joysticks: SDL pads that no mapping database recognises ("Button N",
+// "Axis N±", "Hat N N/E/S/W") and DirectInput devices ("Button N",
+// "Axis X±"/"Axis Y±"/"Axis Z±"/"Axis Xr±", "Hat 0 N"). Their inputs are only
+// numbered and generic pads disagree on button order, so this is a best-effort
+// default that at least makes every GameCube control reachable: first four
+// buttons -> A/B/X/Y, the usual shoulder/Start indices, left stick on the
+// first two axes, C-stick on the next pair, D-pad on hat 0. Pads SDL knows
+// (the vast majority, with the community database loaded) never land here.
+std::string RawJoystickBindings(const ciface::Core::Device &device,
+                                const std::set<std::string> &names) {
+  const auto has = [&names](const std::string &name) { return names.count(name) != 0; };
+  std::string out = "Device = " + device.GetQualifiedName() + "\n";
+  const auto put = [&out, &has](const char *control, const std::string &input) {
+    if (!has(input))
+      return false;
+    out += control;
+    out += " = `";
+    out += input;
+    out += "`\n";
+    return true;
+  };
+  const auto button = [](int index) { return "Button " + std::to_string(index); };
+
+  put("Buttons/A", button(0));
+  put("Buttons/B", button(1));
+  put("Buttons/X", button(2));
+  put("Buttons/Y", button(3));
+  // 10+ buttons: PlayStation-style generic (L1 R1 L2 R2 Select Start);
+  // 8+: L R Select Start style; fewer: shoulders on 4/5, Start on the last.
+  int last = -1;
+  for (int i = 0; i < 32; ++i)
+    if (has(button(i)))
+      last = i;
+  if (last >= 9) {
+    put("Buttons/Z", button(5));
+    put("Triggers/L", button(6));
+    put("Triggers/R", button(7));
+    put("Triggers/L-Analog", button(6));
+    put("Triggers/R-Analog", button(7));
+    put("Buttons/Start", button(9));
+  } else {
+    put("Triggers/L", button(4));
+    put("Triggers/R", button(5));
+    put("Triggers/L-Analog", button(4));
+    put("Triggers/R-Analog", button(5));
+    if (last >= 7) {
+      put("Buttons/Z", button(6));
+      put("Buttons/Start", button(7));
+    } else if (last >= 0) {
+      put("Buttons/Start", button(last));
+    }
+  }
+
+  if (has("Axis X+")) {  // DirectInput naming
+    put("Main Stick/Up", "Axis Y-");
+    put("Main Stick/Down", "Axis Y+");
+    put("Main Stick/Left", "Axis X-");
+    put("Main Stick/Right", "Axis X+");
+    const bool zr = has("Axis Zr+");
+    put("C-Stick/Up", zr ? "Axis Zr-" : "Axis Yr-");
+    put("C-Stick/Down", zr ? "Axis Zr+" : "Axis Yr+");
+    put("C-Stick/Left", zr ? "Axis Z-" : "Axis Xr-");
+    put("C-Stick/Right", zr ? "Axis Z+" : "Axis Xr+");
+  } else {  // SDL raw joystick: HID convention, negative Y is up
+    put("Main Stick/Up", "Axis 1-");
+    put("Main Stick/Down", "Axis 1+");
+    put("Main Stick/Left", "Axis 0-");
+    put("Main Stick/Right", "Axis 0+");
+    const int cx = has("Axis 4+") ? 3 : 2;  // 5+ axes: 2 is usually a trigger
+    put("C-Stick/Up", "Axis " + std::to_string(cx + 1) + "-");
+    put("C-Stick/Down", "Axis " + std::to_string(cx + 1) + "+");
+    put("C-Stick/Left", "Axis " + std::to_string(cx) + "-");
+    put("C-Stick/Right", "Axis " + std::to_string(cx) + "+");
+  }
+  put("D-Pad/Up", "Hat 0 N");
+  put("D-Pad/Down", "Hat 0 S");
+  put("D-Pad/Left", "Hat 0 W");
+  put("D-Pad/Right", "Hat 0 E");
+
+  out += "Main Stick/Calibration = 100.00\n";
+  out += "C-Stick/Calibration = 100.00\n";
+  return out;
+}
+
 // frontend::GenerateControllerConfig callback: renders the binding block for
 // one [GCPadN] section bound to a gamepad by walking the real device, so the
-// written names are the ones the running backend actually exposes. This
-// build uses Dolphin's evdev backend, which names buttons after the kernel
-// event codes (SOUTH/EAST/NORTH/WEST/TL/TR/TL2/TR2/START/DPAD_UP/...) and
-// axes "Axis N±" numbered in ascending ABS-code order — none of the SDL
-// gamecontroller labels ("Button A", "Left Y+", "Trigger L", "Pad N") exist
-// there, which is why generated configs silently bound nothing.
+// written names are the ones the running backend actually exposes. Three
+// naming schemes exist: SDL/XInput/WGInput gamepads (NamedGamepadBindings --
+// every pad on Windows and macOS, and the SDL rows on Linux), numbered raw
+// joysticks (RawJoystickBindings) and Linux evdev, which names buttons after
+// the kernel event codes (SOUTH/EAST/NORTH/WEST/TL/TR/TL2/TR2/START/DPAD_UP/...)
+// and axes "Axis N±" in ascending ABS-code order (the walk below).
 std::string ProvideGamepadPadBindings(std::string_view spec) {
-  const auto device = DeviceForValue(std::string(spec));
+  auto device = DeviceForValue(std::string(spec));
+  // ApplyControllerLive refreshes the device list right before generating, and
+  // SDL re-adds its pads asynchronously on its hotplug thread
+  // (SDL InputBackend::PopulateDevices only posts an event). Straight after the
+  // refresh the pad the user just picked can be briefly absent, which failed
+  // every SDL selection with "gamepad device not found". Wait for it, bounded.
+  for (int attempt = 0; !device && attempt < 40; ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    device = DeviceForValue(std::string(spec));
+  }
   if (!device)
     return {};
 
@@ -284,13 +475,18 @@ std::string ProvideGamepadPadBindings(std::string_view spec) {
   // WEST=left). Nintendo-labeled pads put A/B/X/Y on east/south/north/west
   // respectively, so bind by the printed label there (A stays A on a Switch
   // pad); Xbox-labeled pads get the standard a=south, b=east, x=west,
-  // y=north label mapping.
+  // y=north label mapping. GameCube pads are excluded (see IsGameCubePad).
   const std::string device_name = LowerCopy(device->GetName());
-  const bool nintendo_labels =
-      device_name.find("nintendo") != std::string::npos ||
-      device_name.find("switch") != std::string::npos ||
-      device_name.find("joy-con") != std::string::npos ||
-      device_name.find("joycon") != std::string::npos;
+  const bool nintendo_labels = HasNintendoLabels(device_name);
+
+  // SDL / XInput / WGInput devices: Dolphin-named inputs, fixed table. Only
+  // Linux evdev devices fall through to the positional walk below.
+  if (has("Left X+") || has("Button S") || has("Button A"))
+    return NamedGamepadBindings(*device, names, nintendo_labels);
+  // Numbered-input joysticks (unrecognised SDL pads, DirectInput). evdev
+  // never names a button "Button 0", so this cannot catch an evdev pad.
+  if (has("Button 0"))
+    return RawJoystickBindings(*device, names);
 
   // Axis groups in ascending index order. Standard pads expose, in ABS code
   // order: X, Y, [Z, RZ on pads with analog triggers], RX, RY, HAT0X,
