@@ -2559,12 +2559,13 @@ void ConfigMenu::DrawGameplayTab() {
   LogItemRect("widget", "neutral-ball-marker");
   ImGui::Spacing();
   ImGui::TextWrapped(
-      "When both players on a team are human, the marker where the ball will "
-      "land is drawn in neutral grey instead of the colour of the player the "
-      "game picked, so the two of you decide who goes for it. The 1P/2P "
-      "arrows still show who is who. Teams with a COM partner keep the "
-      "coloured marker, so you can still see whether your partner will take "
-      "the ball. Applies immediately.");
+      "When both players on a team are human, the serve-receive marker keeps "
+      "the colour of the player the game picked. From the first touch after "
+      "the serve, the marker where the ball will land is drawn in neutral "
+      "grey for the rest of the rally, so the two of you decide who goes for "
+      "it. The 1P/2P arrows still show who is who. Teams with a COM partner "
+      "keep the coloured marker, so you can still see whether your partner "
+      "will take the ball. Applies immediately.");
 }
 
 void ConfigMenu::DrawCheatsTab() {

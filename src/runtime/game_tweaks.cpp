@@ -26,13 +26,20 @@
 //    *(*(*(bank + 12) + 8) + (id & 0x1FF) * 8) (as the game's draw does).
 //  - Teams: 0x8021D018 holds 2 teams x 2 player pointers; player+28 is
 //    nonzero for COM, player+37 is the controller colour index.
+//  - Ball state block 0x801DAE80; +28 (s8, set through 0x800083D0) is the
+//    kind of the last hit: 1 toss, 2 serve, 3 pass/dig, 4 set, 5 spike,
+//    6 block, 7-8 dead ball, 0 between rallies. It changes on every touch,
+//    and the next marker is drawn after it, so "2" means the marker is the
+//    serve-receive one (traced in VS and in the attract demo).
 //
 // The patch sits on the four player setters. Indirect calls always come back
 // through the chassis, so the patch fires in chained builds and does not need
 // the code chunk on the fallback CPU (MODERNGEKKO_MOD_PATCH_INDIRECT): no
 // direct `bl` to any of them exists in the DOL. When the option is on, the
-// model is one of the marker models, and the player the colour belongs to has
-// a human teammate, the call is sent to the COM grey setter instead.
+// model is one of the marker models, the last hit was not the serve (so the
+// serve-receive marker keeps its colour, and everything after the first touch
+// is grey), and the player the colour belongs to has a human teammate, the
+// call is sent to the COM grey setter instead.
 // Otherwise the original setter runs: the patch performs its first
 // instruction (stwu r1,-16(r1)) and resumes at the next one, because jumping
 // to the patched address would re-enter the patch.
@@ -53,6 +60,8 @@ constexpr std::uint32_t kTeamTable = 0x8021D018u;  // 2 teams x 2 player pointer
 constexpr std::uint32_t kPlayerIsCom = 28;         // u8, nonzero = COM-controlled
 constexpr std::uint32_t kPlayerColour = 37;        // s8, 0-3 = controller (1P..4P)
 constexpr std::uint32_t kStwuR1Minus16 = 0x9421FFF0u;
+constexpr std::uint32_t kLastHitKind = 0x801DAE80u + 28;  // s8, see above
+constexpr int kHitServe = 2;
 
 std::uint32_t Read32(CPUState* state, std::uint32_t address)
 {
@@ -96,6 +105,12 @@ bool IsMarkerModel(CPUState* state)
   return false;
 }
 
+// Is the ball still on its way from the serve (no one has touched it yet)?
+bool ServeInFlight(CPUState* state)
+{
+  return static_cast<std::int8_t>(Read8(state, kLastHitKind)) == kHitServe;
+}
+
 // Is the human player with this colour index on a team of two humans?
 bool OnAllHumanTeam(CPUState* state, int colour)
 {
@@ -136,7 +151,8 @@ void PlayerColourSetter(CPUState* state)
 {
   const bool enabled = s_neutral_ball_marker.load(std::memory_order_relaxed);
   const bool marker = enabled && IsMarkerModel(state);
-  const bool grey = marker && OnAllHumanTeam(state, Colour);
+  const bool serve = marker && ServeInFlight(state);
+  const bool grey = marker && !serve && OnAllHumanTeam(state, Colour);
   if (LogDecisions())
   {
     static int logged = 0;
@@ -147,8 +163,8 @@ void PlayerColourSetter(CPUState* state)
     if (logged < 8 || (marker && logged < 40))
     {
       ++logged;
-      std::fprintf(stderr, "[tweaks] setter %dP model=%08X on=%d marker=%d grey=%d\n",
-                   Colour + 1, state->gpr[3], enabled, marker, grey);
+      std::fprintf(stderr, "[tweaks] setter %dP model=%08X on=%d marker=%d serve=%d grey=%d\n",
+                   Colour + 1, state->gpr[3], enabled, marker, serve, grey);
     }
     if ((calls % 1200u) == 0u)
       std::fprintf(stderr, "[tweaks] %u setter calls: %u marker, %u greyed\n", calls,

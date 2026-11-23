@@ -14,7 +14,9 @@ namespace moderngekko::tweaks
 // Beach Spikers: when both players on the receiving team are human, draw the
 // ball landing marker in the neutral (COM) grey instead of the colour of the
 // player the game picked, so the two players decide between themselves who
-// takes the ball. Off by default.
+// takes the ball. The serve-receive marker keeps its colour; grey starts with
+// the first touch after the serve and lasts until the next serve. Off by
+// default.
 void SetNeutralBallMarker(bool enabled);
 bool NeutralBallMarker();
 
