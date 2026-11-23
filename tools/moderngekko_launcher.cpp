@@ -1279,8 +1279,9 @@ int main(int argc, char** argv)
   std::array<char, 256> netplay_address{};
   std::snprintf(netplay_nickname.data(), netplay_nickname.size(), "%s",
                 config.netplay_nickname.c_str());
+  // 127.0.0.1 is only config.ini's placeholder: nobody joins themselves.
   std::snprintf(netplay_address.data(), netplay_address.size(), "%s",
-                config.netplay_address.c_str());
+                config.netplay_address == "127.0.0.1" ? "" : config.netplay_address.c_str());
   int netplay_port = config.netplay_port;
   bool automatic_buffer = config.netplay_buffer == "auto";
   int manual_buffer = automatic_buffer ? 5 : std::stoi(config.netplay_buffer);
@@ -1464,7 +1465,7 @@ int main(int argc, char** argv)
   int shot_index = 0;
   const auto dump_frame = [&]
   {
-    if (!shot_prefix || shot_index >= 3)
+    if (!shot_prefix || shot_index >= 6)
       return;
     SDL_Surface* frame = SDL_RenderReadPixels(renderer, nullptr);
     if (!frame)
@@ -1623,6 +1624,129 @@ int main(int argc, char** argv)
     }
     pending_launch = mode;
     gate = ModuleGate::Ask;
+  };
+
+  // "Play online...": one small window instead of loose fields, in the order
+  // a player thinks about it (who am I, host or join, where), with what
+  // everybody needs spelled out before anything is started.
+  int online_role = config.netplay_address.empty() || config.netplay_address == "127.0.0.1" ? 0 : 1;
+  std::string online_error;
+  const auto start_online = [&](LaunchMode mode)
+  {
+    std::string name = netplay_nickname.data();
+    while (!name.empty() && name.back() == ' ')
+      name.pop_back();
+    while (!name.empty() && name.front() == ' ')
+      name.erase(name.begin());
+    if (name.empty() || name == "Player")
+    {
+      online_error = "Type your name first: it is how the others see you.";
+      return;
+    }
+    std::string address = netplay_address.data();
+    int port = netplay_port;
+    if (mode == LaunchMode::Join)
+    {
+      const moderngekko::frontend::NetplayAddress parsed =
+          moderngekko::frontend::ParseNetplayAddress(address, static_cast<std::uint16_t>(port));
+      if (!parsed.ok)
+      {
+        online_error = "Type the address the host's lobby shows, for example 192.168.1.50.";
+        return;
+      }
+      address = parsed.host;
+      port = parsed.port;
+    }
+    if (!ensure_controller())
+    {
+      online_error = "Pick your controller first (Controller profile, on the left).";
+      return;
+    }
+    config.netplay_nickname = name;
+    if (mode == LaunchMode::Join)
+      config.netplay_address = address;
+    config.netplay_port = static_cast<std::uint16_t>(port);
+    config.netplay_buffer = automatic_buffer ? "auto" : std::to_string(manual_buffer);
+    config.controllers = configured_controllers.empty()
+                             ? std::vector<std::string>{selected_controller}
+                             : configured_controllers;
+    config.controller = config.controllers.front();
+    config.resolution = resolutions[resolution_index].text;
+    config.show_fps_in_title = show_fps_in_title;
+    std::string error;
+    if (!moderngekko::frontend::SaveConfig(user_directory, config, &error))
+    {
+      online_error = error;
+      return;
+    }
+    ImGui::CloseCurrentPopup();
+    request_launch(mode);
+  };
+  const auto DrawOnlineWizard = [&]
+  {
+    const ImGuiViewport* wizard_viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(wizard_viewport->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(640 * scale, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Play online with friends", nullptr,
+                                ImGuiWindowFlags_NoSavedSettings))
+      return;
+    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.15f);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("Up to 4 players on different computers. Everyone needs "
+                        "this same download with their own copy of the game set up "
+                        "in it, and a controller (or the keyboard).");
+    ImGui::Spacing();
+    ImGui::TextUnformatted("1. Your name");
+    ImGui::SetNextItemWidth(260 * scale);
+    ImGui::InputText("##online_name", netplay_nickname.data(), netplay_nickname.size());
+    ImGui::Spacing();
+    ImGui::TextUnformatted("2. Host or join?");
+    ImGui::RadioButton("Host a game: I start it, my friends join me", &online_role, 0);
+    ImGui::RadioButton("Join a friend's game", &online_role, 1);
+    ImGui::Spacing();
+    if (online_role == 1)
+    {
+      ImGui::TextUnformatted("3. The address shown in the host's lobby");
+      ImGui::SetNextItemWidth(260 * scale);
+      ImGui::InputTextWithHint("##online_address", "e.g. 192.168.1.50",
+                               netplay_address.data(), netplay_address.size());
+      ImGui::TextDisabled("Same home or Wi-Fi: the host's 192.168.x.x address. Another "
+                          "home: their Tailscale address (100.x.x.x), or their public "
+                          "address if they forwarded the port.");
+    }
+    else
+    {
+      ImGui::TextUnformatted("3. Open your lobby");
+      ImGui::TextDisabled("The lobby shows the address to give your friends. When "
+                          "everyone is in, set the teams and press Start. The first "
+                          "time, allow the game through your firewall if asked.");
+    }
+    if (ImGui::TreeNode("Advanced"))
+    {
+      ImGui::SetNextItemWidth(140 * scale);
+      ImGui::InputInt("UDP port (everyone must use the same)", &netplay_port);
+      netplay_port = std::clamp(netplay_port, 1, 65535);
+      ImGui::Checkbox("Automatic input delay (recommended)", &automatic_buffer);
+      if (!automatic_buffer)
+      {
+        ImGui::SetNextItemWidth(200 * scale);
+        ImGui::SliderInt("Input delay (controller reads)", &manual_buffer, 1, 20);
+      }
+      ImGui::TreePop();
+    }
+    if (!online_error.empty())
+      ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "%s", online_error.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+    const char* go = online_role == 0 ? "Open my lobby" : "Join the game";
+    if (ImGui::Button(go, ImVec2(200 * scale, 40 * scale)))
+      start_online(online_role == 0 ? LaunchMode::Host : LaunchMode::Join);
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120 * scale, 40 * scale)))
+      ImGui::CloseCurrentPopup();
+    ImGui::PopFont();
+    ImGui::EndPopup();
   };
 
   while (!done)
@@ -1838,66 +1962,26 @@ int main(int argc, char** argv)
         ImGui::TextDisabled("Solo play only.");
         ImGui::Spacing();
       }
-      // Share the columns's width: three fixed 180 px buttons overflowed it.
+      // Two buttons sharing the column's width.
       const float button_width =
-          (ImGui::GetContentRegionAvail().x -
-           ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
+          (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
       if (ImGui::Button("Play", ImVec2(button_width, 42 * scale)))
         request_launch(LaunchMode::Solo);
       ImGui::SameLine();
-      if (ImGui::Button("Host Netplay", ImVec2(button_width, 42 * scale)))
+      // MODERNGEKKO_LAUNCHER_SHOT_ONLINE=host|join opens the window by itself,
+      // so the screenshot hook above can capture it.
+      static const char* shot_online = SDL_getenv("MODERNGEKKO_LAUNCHER_SHOT_ONLINE");
+      static bool shot_online_opened = false;
+      if (ImGui::Button("Play online...", ImVec2(button_width, 42 * scale)) ||
+          (shot_online && !shot_online_opened))
       {
-        if (ensure_controller())
-        {
-          config.netplay_nickname = netplay_nickname.data();
-          config.netplay_address = netplay_address.data();
-          config.netplay_port = static_cast<std::uint16_t>(netplay_port);
-          config.netplay_buffer = automatic_buffer ? "auto" : std::to_string(manual_buffer);
-          config.controllers = configured_controllers.empty()
-                                   ? std::vector<std::string>{selected_controller}
-                                   : configured_controllers;
-          config.controller = config.controllers.front();
-          config.resolution = resolutions[resolution_index].text;
-          config.show_fps_in_title = show_fps_in_title;
-          std::string error;
-          if (moderngekko::frontend::SaveConfig(user_directory, config, &error))
-          {
-            request_launch(LaunchMode::Host);
-          }
-          else
-          {
-            std::lock_guard lock(dialog.mutex);
-            dialog.error = std::move(error);
-          }
-        }
+        if (shot_online && !shot_online_opened)
+          online_role = std::string_view(shot_online) == "join" ? 1 : 0;
+        shot_online_opened = true;
+        online_error.clear();
+        ImGui::OpenPopup("Play online with friends");
       }
-      ImGui::SameLine();
-      if (ImGui::Button("Join Netplay", ImVec2(button_width, 42 * scale)))
-      {
-        if (ensure_controller())
-        {
-          config.netplay_nickname = netplay_nickname.data();
-          config.netplay_address = netplay_address.data();
-          config.netplay_port = static_cast<std::uint16_t>(netplay_port);
-          config.netplay_buffer = automatic_buffer ? "auto" : std::to_string(manual_buffer);
-          config.controllers = configured_controllers.empty()
-                                   ? std::vector<std::string>{selected_controller}
-                                   : configured_controllers;
-          config.controller = config.controllers.front();
-          config.resolution = resolutions[resolution_index].text;
-          config.show_fps_in_title = show_fps_in_title;
-          std::string error;
-          if (moderngekko::frontend::SaveConfig(user_directory, config, &error))
-          {
-            request_launch(LaunchMode::Join);
-          }
-          else
-          {
-            std::lock_guard lock(dialog.mutex);
-            dialog.error = std::move(error);
-          }
-        }
-      }
+      DrawOnlineWizard();
     }
     else
     {
@@ -1936,21 +2020,6 @@ int main(int argc, char** argv)
     if (ImGui::Button(replace_profile.c_str()))
       select_controller(controller_index);
     ImGui::EndDisabled();
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Netplay");
-    ImGui::SetNextItemWidth(220 * scale);
-    ImGui::InputText("Nickname", netplay_nickname.data(), netplay_nickname.size());
-    ImGui::SetNextItemWidth(220 * scale);
-    ImGui::InputText("Host / IP", netplay_address.data(), netplay_address.size());
-    ImGui::SetNextItemWidth(120 * scale);
-    ImGui::InputInt("UDP port", &netplay_port);
-    netplay_port = std::clamp(netplay_port, 1, 65535);
-    ImGui::Checkbox("Automatic input buffer", &automatic_buffer);
-    if (!automatic_buffer)
-    {
-      ImGui::SetNextItemWidth(180 * scale);
-      ImGui::SliderInt("Buffer frames", &manual_buffer, 1, 20);
-    }
     ImGui::EndChild();
     ImGui::SameLine(0.0f, column_gap);
     ImGui::BeginChild("##launcher_right", ImVec2(0, 0), ImGuiChildFlags_None);
@@ -2540,36 +2609,50 @@ int main(int argc, char** argv)
             switch (static_cast<moderngekko::frontend::NetplayExitCode>(exit_code))
             {
             case moderngekko::frontend::NetplayExitCode::VersionMismatch:
-              launch_error = "The host is running an incompatible netplay build. Both "
-                             "players must use the same release.";
+              launch_error = "The host has a different version of this download. "
+                             "Everyone needs the same release: download the latest one "
+                             "again.";
               break;
             case moderngekko::frontend::NetplayExitCode::CompatibilityMismatch:
-              launch_error = "The extracted game or recomp module does not match the "
-                             "host. Both players need the same game revision and "
-                             "release.";
+              launch_error = "Your game files do not match the host's. Everyone needs "
+                             "the same release and the same version of the game (the "
+                             "USA disc).";
               break;
             case moderngekko::frontend::NetplayExitCode::RoomFull:
-              launch_error = "All four controller slots are already occupied.";
+              launch_error = "The game is full: all four controller ports are taken.";
               break;
             case moderngekko::frontend::NetplayExitCode::GameRunning:
-              launch_error = "The host has already started the game.";
+              launch_error = "The host already started the match. Ask them to close the "
+                             "game window (everyone returns to the lobby), then join "
+                             "again.";
               break;
             case moderngekko::frontend::NetplayExitCode::ServerFull:
-              launch_error = "The netplay server is full.";
+              launch_error = "The lobby is full.";
               break;
             case moderngekko::frontend::NetplayExitCode::NicknameRejected:
-              launch_error = "The nickname was rejected by the host.";
+              launch_error = "That name is too long: use 30 letters or fewer.";
+              break;
+            case moderngekko::frontend::NetplayExitCode::InvalidConfiguration:
+              launch_error = "That address is not valid. Type it exactly as the host's "
+                             "lobby shows it, for example 192.168.1.50.";
               break;
             default:
-              launch_error = "Could not reach the netplay host. Check the host name, UDP "
-                             "port, and firewall.";
+              launch_error = "Could not reach the host at " + config.netplay_address +
+                             ".\n\nCheck that:\n"
+                             "- the host's lobby is open,\n"
+                             "- the address is typed exactly as their lobby shows it,\n"
+                             "- you are on the same network or Tailscale, or the host "
+                             "forwarded UDP port " +
+                             std::to_string(config.netplay_port) +
+                             ",\n- the host allowed the game through their firewall.";
               break;
             }
           }
           else if (launch_mode == LaunchMode::Host)
           {
-            launch_error = "Could not create the netplay session. Check the UDP port "
-                           "and firewall settings.";
+            launch_error = "Could not open the lobby: UDP port " +
+                           std::to_string(config.netplay_port) +
+                           " is already in use (is another lobby still open?).";
           }
           else
           {

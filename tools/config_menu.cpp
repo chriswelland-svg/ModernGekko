@@ -660,6 +660,15 @@ void ConfigMenu::Stop() {
 
 bool ConfigMenu::HotkeyThunk(void *userdata, unsigned keysym) {
   auto *self = static_cast<ConfigMenu *>(userdata);
+  if (keysym == kF1Keysym && self->m_hooks.netplay) {
+    // Opening the menu pauses this machine, and every other player would
+    // freeze waiting for its input. Settings are for solo play.
+    std::fprintf(stderr, "[menu] F1 ignored: online game\n");
+    self->PushToast("Settings are off during online play: change them in solo "
+                    "play, they carry over",
+                    std::chrono::seconds(4));
+    return true;
+  }
   if (keysym == kF1Keysym) {
     const bool visible =
         self->m_visible.load(std::memory_order_relaxed);
@@ -994,7 +1003,10 @@ void ConfigMenu::DrawOverlayFrame() {
       m_presented_frames.fetch_add(1, std::memory_order_relaxed) + 1 >=
           kStartupHintFrame) {
     m_startup_hint_shown.store(true, std::memory_order_relaxed);
-    PushToast("Press F1 for the Settings Menu", std::chrono::seconds(8));
+    if (!m_hooks.netplay)
+      PushToast("Press F1 for the Settings Menu", std::chrono::seconds(8));
+    else if (!m_hooks.netplay_banner.empty())
+      PushToast(m_hooks.netplay_banner, std::chrono::seconds(15));
   }
   // Presentation that belongs to the game session, not to the menu: toasts
   // replace Dolphin's OSD text and the counter replaces GFX_SHOW_FPS.

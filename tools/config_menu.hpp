@@ -64,6 +64,10 @@ public:
     // False on Wayland: this build cannot create an OpenGL context on a
     // Wayland surface, so the Display tab must not offer OGL there.
     bool allow_ogl = true;
+    // Online play: F1 stays closed (the menu pauses this machine, which would
+    // freeze everybody else), and BANNER (the teams) shows at the start.
+    bool netplay = false;
+    std::string netplay_banner;
   };
 
   ConfigMenu() = default;

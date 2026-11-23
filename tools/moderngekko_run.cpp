@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -196,6 +197,160 @@ std::filesystem::path ExecutableDirectory(const char *argv0) {
 // data/gamecontrollerdb.txt (see CMakeLists) -- the same table the launcher
 // loads. C linkage; the definition is a C translation unit.
 extern "C" const char moderngekko_gamecontrollerdb[];
+
+// One game session's frontend side: this machine's settings, the F1 menu and
+// its hooks. Solo play and every online game run through here, so an online
+// player gets the same display, sound, textures and jerseys as in solo play.
+struct SessionSetup {
+  moderngekko::Runtime *runtime = nullptr;
+  moderngekko::frontend::ConfigResult *frontend_config = nullptr;
+  std::filesystem::path user_directory;
+  std::filesystem::path executable_directory;
+  bool allow_ogl = true;
+  bool netplay = false;
+  // The value to run with; online that is the host's setting.
+  bool neutral_ball_marker = false;
+  // Online: the teams, shown when the game starts.
+  std::string banner;
+};
+
+void PrepareSession(const SessionSetup &setup,
+                    moderngekko::frontend::ConfigMenu &config_menu) {
+  moderngekko::frontend::ConfigResult &fc = *setup.frontend_config;
+  // Frontend-owned settings that the runtime does not map itself. Layers
+  // exist now that the runtime initialized the config system, and the video
+  // backend only starts at Run(), so this lands before anything reads it.
+  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_VOLUME,
+                           fc.mute ? 0 : fc.volume);
+  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_MUTED, fc.mute);
+  Config::SetBaseOrCurrent(Config::GFX_VSYNC, fc.vsync);
+  // Display/texture settings from the F1 menu. These have to be in place
+  // before Run() because VideoConfig::LoadConfig() snapshots them into
+  // g_ActiveConfig at backend start; applying them later would mean the first
+  // frame renders with the wrong aspect ratio and without the texture pack.
+  // Guarded: a -1 from either table means "not one of ours" (a hand-edited
+  // config.ini), and writing that through would put a garbage language byte in
+  // the emulated SRAM or an out-of-range aspect enum in the core.
+  const int language_value =
+      moderngekko::frontend::GameCubeLanguageValue(fc.language);
+  if (language_value >= 0)
+    Config::SetBaseOrCurrent(Config::MAIN_GC_LANGUAGE, language_value);
+  const int aspect_value =
+      moderngekko::frontend::AspectRatioMode(fc.aspect_ratio);
+  Config::SetBaseOrCurrent(
+      Config::GFX_ASPECT_RATIO,
+      static_cast<AspectMode>(aspect_value < 0 ? 0 : aspect_value));
+  Config::SetBaseOrCurrent(Config::GFX_WIDESCREEN_HACK,
+                           fc.widescreen_hack);
+  // Team jerseys (F1 > Jersey): rebuild a generated texture that is missing
+  // (an old config.ini in a fresh user folder), and keep the HD texture loader
+  // on while any team has a picture.
+  if (!fc.jerseys.empty()) {
+    const std::filesystem::path &jersey_game = setup.runtime->GetConfig().game_root;
+    const std::filesystem::path jersey_textures =
+        StringToPath(File::GetUserPath(D_HIRESTEXTURES_IDX) +
+                     setup.runtime->GetGameMetadata().disc_id);
+    if (moderngekko::frontend::jersey::Supported(jersey_game)) {
+      for (const auto &[code, image] : fc.jerseys) {
+        if (moderngekko::frontend::jersey::Exists(jersey_game, jersey_textures, code))
+          continue;
+        const auto rebuilt = moderngekko::frontend::jersey::Build(
+            jersey_game, jersey_textures, code, StringToPath(image),
+            {fc.jersey_front, fc.jersey_back});
+        std::cerr << "[jersey] rebuilt " << code << ": " << rebuilt.message << '\n';
+      }
+    }
+  }
+  Config::SetBaseOrCurrent(Config::GFX_HIRES_TEXTURES,
+                           fc.hires_textures ||
+                               !fc.jerseys.empty());
+  Config::SetBaseOrCurrent(Config::GFX_CACHE_HIRES_TEXTURES,
+                           fc.cache_hires_textures);
+  // Cheats: PatchEngine::LoadPatches() runs during core boot and reads this
+  // through Config::AreCheatsEnabled(), so it has to be set before Run().
+  Config::SetBaseOrCurrent(Config::MAIN_ENABLE_CHEATS,
+                           fc.enable_cheats);
+  // Gameplay options (F1 > Gameplay); the runtime attached their code at
+  // Create() when this game build supports them.
+  // Online, every machine runs the host's choice: the option changes which
+  // game code runs, and diverging code means a desync.
+  moderngekko::tweaks::SetNeutralBallMarker(setup.neutral_ball_marker);
+  // Plug a GameCube controller into each port that has a device assigned, so
+  // ports 2-4 reach the game. Netplay assigns the ports itself.
+  if (!setup.netplay)
+    moderngekko::frontend::ApplyControllerPorts(fc.controllers);
+  std::cerr << "[run] config: language=" << fc.language
+            << " aspect=" << fc.aspect_ratio
+            << " widescreen=" << (fc.widescreen_hack ? 1 : 0)
+            << " hires=" << (fc.hires_textures ? 1 : 0)
+            << " jerseys=" << fc.jerseys.size()
+            << " cache_hires=" << (fc.cache_hires_textures ? 1 : 0)
+            << '\n';
+
+  {
+    moderngekko::frontend::ConfigMenu::Hooks hooks;
+    hooks.runtime = setup.runtime;
+    hooks.user_directory = setup.user_directory;
+    hooks.config = setup.frontend_config;
+    const moderngekko::GameMetadata &metadata =
+        setup.runtime->GetGameMetadata();
+    hooks.game_name = metadata.game_name;
+    hooks.disc_id = metadata.disc_id;
+    hooks.dol_sha256 = metadata.dol_sha256;
+    hooks.module_path = setup.runtime->GetConfig().module.path.string();
+    // The System tab's region combo needs both: the running disc's extraction
+    // to find its siblings, and the executable's directory to find a module
+    // shipped next to the binary (the installed/AppImage layout).
+    // Read from the runtime, NOT from config: Runtime::Create(std::move(config))
+    // at the top of RunMain already moved config out, so config.game_root is
+    // empty here -- which made every region's game root unresolvable and the
+    // combo report "not installed" for all three.
+    hooks.game_root = setup.runtime->GetConfig().game_root;
+    hooks.executable_directory = setup.executable_directory;
+    // OGL has no Wayland GL context path in this build; the menu must not
+    // offer it when the window is a Wayland surface.
+    hooks.allow_ogl = setup.allow_ogl;
+    hooks.netplay = setup.netplay;
+    hooks.netplay_banner = setup.banner;
+    config_menu.Start(std::move(hooks));
+  }
+
+  // The launcher can record "keyboard as pad" but cannot generate the binding
+  // block: only this process owns Dolphin's controller interface, and the
+  // provider is installed by ConfigMenu::Start above. Refresh the profile here
+  // and reload it so the pad sees the new device list.
+  if (!fc.controllers.empty() &&
+      fc.controllers.front().starts_with("Keyboard"))
+  {
+    // The controller interface enumerates devices on its own thread, so the
+    // keyboard is not necessarily visible the instant the core is up. Generating
+    // too early failed, Pad had already loaded an empty profile, and the first
+    // launch then had no input until the second run wrote the file. Poll until
+    // the device shows up (bounded), then reload the pad config.
+    std::string controller_error;
+    bool controller_ready = false;
+    for (int attempt = 0; attempt < 50 && !controller_ready; ++attempt)
+    {
+      if (moderngekko::frontend::GenerateControllerConfig(
+              setup.user_directory, fc.controllers, &controller_error))
+      {
+        controller_ready = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (controller_ready)
+    {
+      if (Pad::IsInitialized())
+        Pad::LoadConfig();
+      std::fprintf(stderr, "[run] keyboard controller profile ready\n");
+    }
+    else
+    {
+      std::cerr << "[run] keyboard controller setup failed: " << controller_error << '\n';
+    }
+  }
+}
 
 int RunMain(int argc, char **argv) {
   // Must precede SDL_Init(SDL_INIT_GAMEPAD) in Dolphin's SDL backend. Without
@@ -470,6 +625,21 @@ int RunMain(int argc, char **argv) {
       std::cerr << "netplay requires at least one selected controller\n";
       return 2;
     }
+    // Players paste "1.2.3.4:2626" as often as "1.2.3.4": split it, and keep
+    // the plain host in config.ini (which only stores a host name).
+    if (options.role == moderngekko::frontend::NetplayRole::Join) {
+      const moderngekko::frontend::NetplayAddress parsed =
+          moderngekko::frontend::ParseNetplayAddress(options.address,
+                                                     options.port);
+      if (!parsed.ok) {
+        std::cerr << "netplay: '" << options.address
+                  << "' is not a host address\n";
+        return static_cast<int>(
+            moderngekko::frontend::NetplayExitCode::InvalidConfiguration);
+      }
+      options.address = parsed.host;
+      options.port = parsed.port;
+    }
     frontend_config.netplay_address = options.address;
     frontend_config.netplay_port = options.port;
     frontend_config.netplay_nickname = options.nickname;
@@ -489,8 +659,40 @@ int RunMain(int argc, char **argv) {
       return 2;
     }
     std::cerr << "netplay: runner started\n";
+    // Each online game gets this machine's own settings and the F1 hooks,
+    // exactly like solo play; gameplay options come from the host.
+    std::unique_ptr<moderngekko::frontend::ConfigMenu> online_menu;
+    const bool online_allow_ogl =
+        config.window_system != moderngekko::WindowSystem::Wayland;
+    const std::filesystem::path online_user_directory = config.user_directory;
+    moderngekko::frontend::NetplaySessionHooks session_hooks;
+    session_hooks.before_run =
+        [&](moderngekko::Runtime &runtime,
+            moderngekko::frontend::ConfigResult &online_config,
+            std::uint32_t gameplay_options, const std::string &banner) {
+          online_menu = std::make_unique<moderngekko::frontend::ConfigMenu>();
+          SessionSetup session;
+          session.runtime = &runtime;
+          session.frontend_config = &online_config;
+          session.user_directory = online_user_directory;
+          session.executable_directory = executable_directory;
+          session.allow_ogl = online_allow_ogl;
+          session.netplay = true;
+          session.neutral_ball_marker =
+              (gameplay_options &
+               moderngekko::frontend::kNetplayNeutralBallMarker) != 0;
+          session.banner = banner;
+          PrepareSession(session, *online_menu);
+        };
+    session_hooks.after_run = [&] {
+      if (online_menu) {
+        online_menu->Stop();
+        online_menu.reset();
+      }
+    };
     return moderngekko::frontend::RunNetplayLobby(
-        std::move(config), std::move(frontend_config), std::move(options));
+        std::move(config), std::move(frontend_config), std::move(options),
+        std::move(session_hooks));
   }
 
   const std::filesystem::path user_directory = config.user_directory;
@@ -502,137 +704,15 @@ int RunMain(int argc, char **argv) {
   std::cout << "audio backend: " << created.runtime->GetConfig().audio.backend
             << '\n';
 
-  // Frontend-owned settings that the runtime does not map itself. Layers
-  // exist now that the runtime initialized the config system, and the video
-  // backend only starts at Run(), so this lands before anything reads it.
-  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_VOLUME,
-                           frontend_config.mute ? 0 : frontend_config.volume);
-  Config::SetBaseOrCurrent(Config::MAIN_AUDIO_MUTED, frontend_config.mute);
-  Config::SetBaseOrCurrent(Config::GFX_VSYNC, frontend_config.vsync);
-  // Display/texture settings from the F1 menu. These have to be in place
-  // before Run() because VideoConfig::LoadConfig() snapshots them into
-  // g_ActiveConfig at backend start; applying them later would mean the first
-  // frame renders with the wrong aspect ratio and without the texture pack.
-  // Guarded: a -1 from either table means "not one of ours" (a hand-edited
-  // config.ini), and writing that through would put a garbage language byte in
-  // the emulated SRAM or an out-of-range aspect enum in the core.
-  const int language_value =
-      moderngekko::frontend::GameCubeLanguageValue(frontend_config.language);
-  if (language_value >= 0)
-    Config::SetBaseOrCurrent(Config::MAIN_GC_LANGUAGE, language_value);
-  const int aspect_value =
-      moderngekko::frontend::AspectRatioMode(frontend_config.aspect_ratio);
-  Config::SetBaseOrCurrent(
-      Config::GFX_ASPECT_RATIO,
-      static_cast<AspectMode>(aspect_value < 0 ? 0 : aspect_value));
-  Config::SetBaseOrCurrent(Config::GFX_WIDESCREEN_HACK,
-                           frontend_config.widescreen_hack);
-  // Team jerseys (F1 > Jersey): rebuild a generated texture that is missing
-  // (an old config.ini in a fresh user folder), and keep the HD texture loader
-  // on while any team has a picture.
-  if (!frontend_config.jerseys.empty()) {
-    const std::filesystem::path &jersey_game = created.runtime->GetConfig().game_root;
-    const std::filesystem::path jersey_textures =
-        StringToPath(File::GetUserPath(D_HIRESTEXTURES_IDX) +
-                     created.runtime->GetGameMetadata().disc_id);
-    if (moderngekko::frontend::jersey::Supported(jersey_game)) {
-      for (const auto &[code, image] : frontend_config.jerseys) {
-        if (moderngekko::frontend::jersey::Exists(jersey_game, jersey_textures, code))
-          continue;
-        const auto rebuilt = moderngekko::frontend::jersey::Build(
-            jersey_game, jersey_textures, code, StringToPath(image),
-            {frontend_config.jersey_front, frontend_config.jersey_back});
-        std::cerr << "[jersey] rebuilt " << code << ": " << rebuilt.message << '\n';
-      }
-    }
-  }
-  Config::SetBaseOrCurrent(Config::GFX_HIRES_TEXTURES,
-                           frontend_config.hires_textures ||
-                               !frontend_config.jerseys.empty());
-  Config::SetBaseOrCurrent(Config::GFX_CACHE_HIRES_TEXTURES,
-                           frontend_config.cache_hires_textures);
-  // Cheats: PatchEngine::LoadPatches() runs during core boot and reads this
-  // through Config::AreCheatsEnabled(), so it has to be set before Run().
-  Config::SetBaseOrCurrent(Config::MAIN_ENABLE_CHEATS,
-                           frontend_config.enable_cheats);
-  // Gameplay options (F1 > Gameplay); the runtime attached their code at
-  // Create() when this game build supports them.
-  moderngekko::tweaks::SetNeutralBallMarker(frontend_config.neutral_ball_marker);
-  // Plug a GameCube controller into each port that has a device assigned, so
-  // ports 2-4 reach the game. Netplay assigns the ports itself.
-  if (!netplay_role)
-    moderngekko::frontend::ApplyControllerPorts(frontend_config.controllers);
-  std::cerr << "[run] config: language=" << frontend_config.language
-            << " aspect=" << frontend_config.aspect_ratio
-            << " widescreen=" << (frontend_config.widescreen_hack ? 1 : 0)
-            << " hires=" << (frontend_config.hires_textures ? 1 : 0)
-            << " jerseys=" << frontend_config.jerseys.size()
-            << " cache_hires=" << (frontend_config.cache_hires_textures ? 1 : 0)
-            << '\n';
-
+  SessionSetup session;
+  session.runtime = created.runtime.get();
+  session.frontend_config = &frontend_config;
+  session.user_directory = user_directory;
+  session.executable_directory = executable_directory;
+  session.allow_ogl = config.window_system != moderngekko::WindowSystem::Wayland;
+  session.neutral_ball_marker = frontend_config.neutral_ball_marker;
   moderngekko::frontend::ConfigMenu config_menu;
-  {
-    moderngekko::frontend::ConfigMenu::Hooks hooks;
-    hooks.runtime = created.runtime.get();
-    hooks.user_directory = user_directory;
-    hooks.config = &frontend_config;
-    const moderngekko::GameMetadata &metadata =
-        created.runtime->GetGameMetadata();
-    hooks.game_name = metadata.game_name;
-    hooks.disc_id = metadata.disc_id;
-    hooks.dol_sha256 = metadata.dol_sha256;
-    hooks.module_path = created.runtime->GetConfig().module.path.string();
-    // The System tab's region combo needs both: the running disc's extraction
-    // to find its siblings, and the executable's directory to find a module
-    // shipped next to the binary (the installed/AppImage layout).
-    // Read from the runtime, NOT from config: Runtime::Create(std::move(config))
-    // at the top of RunMain already moved config out, so config.game_root is
-    // empty here -- which made every region's game root unresolvable and the
-    // combo report "not installed" for all three.
-    hooks.game_root = created.runtime->GetConfig().game_root;
-    hooks.executable_directory = executable_directory;
-    // OGL has no Wayland GL context path in this build; the menu must not
-    // offer it when the window is a Wayland surface.
-    hooks.allow_ogl =
-        config.window_system != moderngekko::WindowSystem::Wayland;
-    config_menu.Start(std::move(hooks));
-  }
-
-  // The launcher can record "keyboard as pad" but cannot generate the binding
-  // block: only this process owns Dolphin's controller interface, and the
-  // provider is installed by ConfigMenu::Start above. Refresh the profile here
-  // and reload it so the pad sees the new device list.
-  if (!frontend_config.controllers.empty() &&
-      frontend_config.controllers.front().starts_with("Keyboard"))
-  {
-    // The controller interface enumerates devices on its own thread, so the
-    // keyboard is not necessarily visible the instant the core is up. Generating
-    // too early failed, Pad had already loaded an empty profile, and the first
-    // launch then had no input until the second run wrote the file. Poll until
-    // the device shows up (bounded), then reload the pad config.
-    std::string controller_error;
-    bool controller_ready = false;
-    for (int attempt = 0; attempt < 50 && !controller_ready; ++attempt)
-    {
-      if (moderngekko::frontend::GenerateControllerConfig(
-              user_directory, frontend_config.controllers, &controller_error))
-      {
-        controller_ready = true;
-        break;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    if (controller_ready)
-    {
-      if (Pad::IsInitialized())
-        Pad::LoadConfig();
-      std::fprintf(stderr, "[run] keyboard controller profile ready\n");
-    }
-    else
-    {
-      std::cerr << "[run] keyboard controller setup failed: " << controller_error << '\n';
-    }
-  }
+  PrepareSession(session, config_menu);
 
   std::signal(SIGINT, HandleStopSignal);
   std::signal(SIGTERM, HandleStopSignal);
