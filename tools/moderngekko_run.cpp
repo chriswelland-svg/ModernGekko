@@ -1,6 +1,7 @@
 #include "cache_affinity.hpp"
 #include "config_menu.hpp"
 #include "frontend_config.hpp"
+#include "jersey.hpp"
 #include "dol_patch.hpp"
 #include "moderngekko/game.hpp"
 #include "moderngekko/game_tweaks.hpp"
@@ -8,6 +9,7 @@
 #include "netplay_session.hpp"
 
 #include "Common/Config/Config.h"
+#include "Common/FileUtil.h"
 #include "Common/StringUtil.h"
 #include "Core/Config/CheatSettings.h"
 #include "Core/Config/GraphicsSettings.h"
@@ -525,8 +527,28 @@ int RunMain(int argc, char **argv) {
       static_cast<AspectMode>(aspect_value < 0 ? 0 : aspect_value));
   Config::SetBaseOrCurrent(Config::GFX_WIDESCREEN_HACK,
                            frontend_config.widescreen_hack);
+  // Team jerseys (F1 > Jersey): rebuild a generated texture that is missing
+  // (an old config.ini in a fresh user folder), and keep the HD texture loader
+  // on while any team has a picture.
+  if (!frontend_config.jerseys.empty()) {
+    const std::filesystem::path &jersey_game = created.runtime->GetConfig().game_root;
+    const std::filesystem::path jersey_textures =
+        StringToPath(File::GetUserPath(D_HIRESTEXTURES_IDX) +
+                     created.runtime->GetGameMetadata().disc_id);
+    if (moderngekko::frontend::jersey::Supported(jersey_game)) {
+      for (const auto &[code, image] : frontend_config.jerseys) {
+        if (moderngekko::frontend::jersey::Exists(jersey_game, jersey_textures, code))
+          continue;
+        const auto rebuilt = moderngekko::frontend::jersey::Build(
+            jersey_game, jersey_textures, code, StringToPath(image),
+            {frontend_config.jersey_front, frontend_config.jersey_back});
+        std::cerr << "[jersey] rebuilt " << code << ": " << rebuilt.message << '\n';
+      }
+    }
+  }
   Config::SetBaseOrCurrent(Config::GFX_HIRES_TEXTURES,
-                           frontend_config.hires_textures);
+                           frontend_config.hires_textures ||
+                               !frontend_config.jerseys.empty());
   Config::SetBaseOrCurrent(Config::GFX_CACHE_HIRES_TEXTURES,
                            frontend_config.cache_hires_textures);
   // Cheats: PatchEngine::LoadPatches() runs during core boot and reads this
@@ -544,6 +566,7 @@ int RunMain(int argc, char **argv) {
             << " aspect=" << frontend_config.aspect_ratio
             << " widescreen=" << (frontend_config.widescreen_hack ? 1 : 0)
             << " hires=" << (frontend_config.hires_textures ? 1 : 0)
+            << " jerseys=" << frontend_config.jerseys.size()
             << " cache_hires=" << (frontend_config.cache_hires_textures ? 1 : 0)
             << '\n';
 

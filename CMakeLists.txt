@@ -465,6 +465,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         tools/netplay_session.cpp
         tools/frontend_config.cpp
         tools/dol_patch.cpp
+        tools/jersey.cpp
         vendor/dolphin/Externals/imgui/imgui/backends/imgui_impl_sdl3.cpp
         vendor/dolphin/Externals/imgui/imgui/backends/imgui_impl_sdlrenderer3.cpp)
     target_include_directories(moderngekko-run PRIVATE
@@ -472,7 +473,11 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core"
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Externals/imgui/imgui/backends")
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Externals/imgui/imgui/backends"
+        # stb_image.h, for the jersey images (tools/jersey.cpp)
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Externals/tinygltf/tinygltf"
+        # VideoCommon/Resources/CustomResourceManager.h -> MaterialAsset.h
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Externals/picojson")
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         target_compile_definitions(moderngekko-run PRIVATE _ARCH_64=1)
     else()
@@ -495,6 +500,8 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     endif()
     target_link_libraries(moderngekko-run PRIVATE
         ModernGekko::Runtime core uicommon imgui ${_moderngekko_sdl_target})
+    # The jersey builder names its textures the way Dolphin does (XXH64).
+    target_link_libraries(moderngekko-run PRIVATE xxhash::xxhash)
     set_target_properties(moderngekko-run PROPERTIES
         OUTPUT_NAME "${MODERNGEKKO_RUNNER_OUTPUT_NAME}")
     target_compile_definitions(moderngekko-run PRIVATE

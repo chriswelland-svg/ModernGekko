@@ -219,6 +219,19 @@ ConfigResult LoadConfig(const fs::path &user_directory,
     } else if (key == "neutral_ball_marker") {
       if (!ParseBoolean(value, &config.neutral_ball_marker))
         return {.error = "neutral_ball_marker must be true or false"};
+    } else if (key == "jersey_front") {
+      if (!ParseBoolean(value, &config.jersey_front))
+        return {.error = "jersey_front must be true or false"};
+    } else if (key == "jersey_back") {
+      if (!ParseBoolean(value, &config.jersey_back))
+        return {.error = "jersey_back must be true or false"};
+    } else if (key.starts_with("jersey_") && key.size() == 10) {
+      // jersey_<team code>=<image path>; an empty path means none.
+      std::string code = key.substr(7);
+      for (char &c : code)
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+      if (!raw_value.empty())
+        config.jerseys[code] = raw_value;
     } else if (key == "state_slot") {
       int slot = 0;
       const auto parsed = std::from_chars(
@@ -402,7 +415,18 @@ bool SaveConfig(const fs::path &user_directory, const ConfigResult &config,
        << "mute=" << (config.mute ? "true" : "false") << '\n'
        << "[Gameplay]\n"
        << "neutral_ball_marker="
-       << (config.neutral_ball_marker ? "true" : "false") << '\n';
+       << (config.neutral_ball_marker ? "true" : "false") << '\n'
+       << "[Jersey]\n"
+       << "jersey_front=" << (config.jersey_front ? "true" : "false") << '\n'
+       << "jersey_back=" << (config.jersey_back ? "true" : "false") << '\n';
+  for (const auto &[code, image] : config.jerseys) {
+    if (code.size() != 3 || image.find_first_of("\r\n") != std::string::npos)
+      continue;
+    std::string key = code;
+    for (char &c : key)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    file << "jersey_" << key << '=' << image << '\n';
+  }
   // Its own section: it is a build setting, and the [Input] block below is a
   // list of controllerN= keys. Omitted entirely when nothing was chosen, so a
   // default install's config stays the documented set.

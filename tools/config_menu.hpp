@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -105,6 +106,7 @@ private:
   void DrawStatesTab();
   void DrawCheatsTab();
   void DrawGameplayTab();
+  void DrawJerseyTab();
   void DrawSystemTab();
   // One row of the System tab's region combo: the disc id, its human label
   // ("NTSC-U"), and where its game root and recompiled module live. Either
@@ -151,6 +153,14 @@ private:
   void ApplyControllerLive();
   void ApplyAudioBackendLive();
   void ApplyTexturesLive();
+  // Team jerseys: the HD texture loader must be on while any team has one,
+  // and the texture folder must be re-read after a jersey file changes.
+  bool HiresTexturesWanted() const;
+  void RequestTextureReload();
+  void RunTextureReload();
+  void StartJerseyBuild(std::vector<std::pair<std::string, std::string>> teams);
+  void StartJerseyRemove(std::string team);
+  void PollJerseyJobs();
   void RescanDevices();
   // Cheats: re-reads GameSettings/<id>.ini for the tab's list, and re-loads +
   // re-applies the enabled codes through Core/Cheats. Both are safe while the
@@ -232,6 +242,31 @@ private:
   bool m_textures_scanned = false;
   std::size_t m_texture_files = 0;
   std::string m_texture_scan_dir;
+  // Jersey tab. Picking a file and building the textures both run on worker
+  // threads; the results are collected by PollJerseyJobs on the video thread.
+  struct JerseyPick {
+    std::filesystem::path path;
+    std::string error;
+  };
+  struct JerseyJob {
+    bool remove = false;
+    std::vector<std::pair<std::string, std::string>> teams; // code, image
+    std::vector<std::string> failed;
+    std::vector<std::string> textures; // texture ids whose file changed
+    std::string message;
+  };
+  int m_jersey_team = -1;
+  std::string m_jersey_pick_team;
+  std::future<JerseyPick> m_jersey_pick;
+  std::future<JerseyJob> m_jersey_job;
+  std::array<char, 1024> m_jersey_path{};
+  // Set when a jersey file changed; RunTextureReload re-reads the texture
+  // folder on the video thread (the menu pauses the game, and Dolphin only
+  // re-reads it by itself when the loader setting flips on a running frame).
+  bool m_texture_reload_pending = false;
+  // Texture ids whose file changed: Dolphin's resource manager keeps loaded
+  // custom textures by id, so each one is marked for reload.
+  std::vector<std::string> m_jersey_dirty;
   // Cheats tab. m_cheats_game_id is the disc id the list was built for, so a
   // game swap (or the first draw) triggers a re-read.
   std::vector<CheatListEntry> m_cheats;

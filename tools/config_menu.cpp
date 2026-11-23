@@ -1,4 +1,5 @@
 #include "config_menu.hpp"
+#include "jersey.hpp"
 
 #include "moderngekko/game.hpp"
 #include "moderngekko/game_tweaks.hpp"
@@ -34,6 +35,9 @@
 #include "VideoCommon/OnScreenDisplay.h"
 #include "VideoCommon/OnScreenUI.h"
 #include "VideoCommon/Present.h"
+#include "VideoCommon/Resources/CustomResourceManager.h"
+#include "VideoCommon/TextureCacheBase.h"
+#include "Common/StringUtil.h"
 #include "VideoCommon/VideoConfig.h"
 
 #include <imgui.h>
@@ -974,6 +978,9 @@ void ConfigMenu::DrawOverlayFrame() {
   // Persist-on-close: runs even when the menu is (already) hidden.
   if (m_save_pending.exchange(false, std::memory_order_relaxed))
     Save("config");
+  // Jersey dialog/build results, and the texture re-read they ask for.
+  PollJerseyJobs();
+  RunTextureReload();
   // Proof for the regression harness that the running core actually picked up
   // a live-applied setting (only under MODERNGEKKO_MENU_DEBUG=1).
   ReportLiveState();
@@ -1174,6 +1181,12 @@ void ConfigMenu::Draw() {
     LogItemRect("tab", "Gameplay");
     if (gameplay_open) {
       DrawGameplayTab();
+      ImGui::EndTabItem();
+    }
+    const bool jersey_open = ImGui::BeginTabItem("Jersey");
+    LogItemRect("tab", "Jersey");
+    if (jersey_open) {
+      DrawJerseyTab();
       ImGui::EndTabItem();
     }
     const bool system_open = ImGui::BeginTabItem("System");
@@ -1535,10 +1548,140 @@ void ConfigMenu::ApplyTexturesLive() {
   // is what re-reads the pack folder (HiresTexture::Update) and invalidates
   // the decoded texture cache when the setting actually flipped.
   ConfigResult &cfg = *m_hooks.config;
-  Config::SetCurrent(Config::GFX_HIRES_TEXTURES, cfg.hires_textures);
+  Config::SetCurrent(Config::GFX_HIRES_TEXTURES, HiresTexturesWanted());
   Config::SetCurrent(Config::GFX_CACHE_HIRES_TEXTURES, cfg.cache_hires_textures);
-  std::fprintf(stderr, "[menu] textures applied: hires=%d cache=%d\n",
-               cfg.hires_textures ? 1 : 0, cfg.cache_hires_textures ? 1 : 0);
+  std::fprintf(stderr, "[menu] textures applied: hires=%d (packs=%d jerseys=%zu) cache=%d\n",
+               HiresTexturesWanted() ? 1 : 0, cfg.hires_textures ? 1 : 0,
+               cfg.jerseys.size(), cfg.cache_hires_textures ? 1 : 0);
+}
+
+bool ConfigMenu::HiresTexturesWanted() const {
+  const ConfigResult &cfg = *m_hooks.config;
+  return cfg.hires_textures || !cfg.jerseys.empty();
+}
+
+void ConfigMenu::RequestTextureReload() { m_texture_reload_pending = true; }
+
+// Video thread (overlay hook), between frames: the texture cache belongs to
+// this thread, so it can be cleared here.
+void ConfigMenu::RunTextureReload() {
+  if (!m_texture_reload_pending)
+    return;
+  m_texture_reload_pending = false;
+  // A changed file keeps its id, and the resource manager would keep serving
+  // the old picture: mark it for reload. It reloads on the next running frame,
+  // and the texture cache sees the newer load time (DidLinkedAssetsChange).
+  auto &resources = Core::System::GetInstance().GetCustomResourceManager();
+  for (const std::string &id : m_jersey_dirty)
+    resources.MarkAssetDirty(id);
+  m_jersey_dirty.clear();
+  const bool wanted = HiresTexturesWanted();
+  if (wanted != g_ActiveConfig.bHiresTextures) {
+    // Turning the loader on or off re-reads the folder and clears the cache
+    // on the next running frame (TextureCacheBase::OnConfigChanged).
+    ApplyTexturesLive();
+    return;
+  }
+  if (!wanted)
+    return;
+  // Files added or deleted: rebuild the loader's list of texture ids.
+  HiresTexture::Clear();
+  HiresTexture::Update();
+  if (g_texture_cache)
+    g_texture_cache->Invalidate();
+  std::fprintf(stderr, "[jersey] texture folder re-read\n");
+}
+
+void ConfigMenu::StartJerseyBuild(
+    std::vector<std::pair<std::string, std::string>> teams) {
+  if (m_jersey_job.valid() || teams.empty())
+    return;
+  const ConfigResult &cfg = *m_hooks.config;
+  const jersey::Placement placement{cfg.jersey_front, cfg.jersey_back};
+  const std::filesystem::path game_root = m_hooks.game_root;
+  const std::filesystem::path directory = StringToPath(TextureDirectory());
+  m_jersey_job = std::async(
+      std::launch::async,
+      [game_root, directory, placement, teams = std::move(teams)] {
+        JerseyJob job;
+        job.teams = teams;
+        int built = 0;
+        for (const auto &[code, image] : job.teams) {
+          const jersey::Result result =
+              jersey::Build(game_root, directory, code, StringToPath(image), placement);
+          std::fprintf(stderr, "[jersey] build %s from %s: %s\n", code.c_str(),
+                       image.c_str(), result.message.c_str());
+          if (result.ok)
+            ++built;
+          else
+            job.failed.push_back(code);
+          job.textures.insert(job.textures.end(), result.textures.begin(),
+                              result.textures.end());
+          if (job.teams.size() == 1 || !result.ok)
+            job.message = result.message;
+        }
+        if (job.teams.size() > 1 && job.failed.empty())
+          job.message = std::to_string(built) + " team jerseys updated";
+        return job;
+      });
+  SetStatus("making the jersey...");
+}
+
+void ConfigMenu::StartJerseyRemove(std::string team) {
+  if (m_jersey_job.valid())
+    return;
+  const std::filesystem::path game_root = m_hooks.game_root;
+  const std::filesystem::path directory = StringToPath(TextureDirectory());
+  m_jersey_job = std::async(std::launch::async, [game_root, directory, team] {
+    JerseyJob job;
+    job.remove = true;
+    job.teams.emplace_back(team, std::string());
+    const jersey::Result result = jersey::Remove(game_root, directory, team);
+    std::fprintf(stderr, "[jersey] remove %s: %s\n", team.c_str(), result.message.c_str());
+    if (!result.ok)
+      job.failed.push_back(team);
+    job.textures = result.textures;
+    job.message = result.message;
+    return job;
+  });
+}
+
+// Video thread, every frame: collect a finished file dialog or jersey job.
+void ConfigMenu::PollJerseyJobs() {
+  using namespace std::chrono_literals;
+  if (m_jersey_pick.valid() && m_jersey_pick.wait_for(0s) == std::future_status::ready) {
+    JerseyPick pick = m_jersey_pick.get();
+    if (!pick.error.empty()) {
+      SetStatus(pick.error);
+    } else if (pick.path.empty()) {
+      SetStatus("no picture chosen");
+    } else {
+      const std::string path = PathToString(pick.path);
+      std::snprintf(m_jersey_path.data(), m_jersey_path.size(), "%s", path.c_str());
+      StartJerseyBuild({{m_jersey_pick_team, path}});
+    }
+  }
+  if (m_jersey_job.valid() && m_jersey_job.wait_for(0s) == std::future_status::ready) {
+    JerseyJob job = m_jersey_job.get();
+    ConfigResult &cfg = *m_hooks.config;
+    bool changed = false;
+    for (const auto &[code, image] : job.teams) {
+      if (std::find(job.failed.begin(), job.failed.end(), code) != job.failed.end())
+        continue;
+      if (job.remove)
+        cfg.jerseys.erase(code);
+      else
+        cfg.jerseys[code] = image;
+      changed = true;
+    }
+    m_jersey_dirty.insert(m_jersey_dirty.end(), job.textures.begin(), job.textures.end());
+    if (changed)
+      Save("config");
+    if (changed || !job.textures.empty())
+      RequestTextureReload();
+    SetStatus(job.message);
+    PushToast(job.message, std::chrono::seconds(3));
+  }
 }
 
 void ConfigMenu::ApplyAudioBackendLive() {
@@ -2568,6 +2711,118 @@ void ConfigMenu::DrawGameplayTab() {
       "will take the ball. Applies immediately.");
 }
 
+void ConfigMenu::DrawJerseyTab() {
+  ConfigResult &cfg = *m_hooks.config;
+  if (!jersey::Supported(m_hooks.game_root)) {
+    ImGui::TextWrapped("Team jerseys need Beach Spikers' own uniform files "
+                       "(files/chara/CHA_*_BODY_*.tpl), and this game doesn't "
+                       "have them.");
+    return;
+  }
+  const std::span<const jersey::Team> teams = jersey::Teams();
+  if (m_jersey_team < 0 || m_jersey_team >= static_cast<int>(teams.size())) {
+    // Start on a team that already has a picture, else USA (last).
+    m_jersey_team = static_cast<int>(teams.size()) - 1;
+    for (std::size_t i = 0; i < teams.size(); ++i) {
+      if (cfg.jerseys.contains(teams[i].code)) {
+        m_jersey_team = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+  const jersey::Team &team = teams[static_cast<std::size_t>(m_jersey_team)];
+  const bool busy = m_jersey_pick.valid() || m_jersey_job.valid();
+  const float scale = ImGui::GetFontSize() / 16.0f;
+
+  ImGui::TextDisabled("Put your own picture on a team's uniform");
+  ImGui::Spacing();
+  ImGui::SetNextItemWidth(260.0f * scale);
+  // All 16 teams at once rather than a scrolling list of 8.
+  if (ImGui::BeginCombo("Team", team.name, ImGuiComboFlags_HeightLargest)) {
+    for (std::size_t i = 0; i < teams.size(); ++i) {
+      std::string label = teams[i].name;
+      if (cfg.jerseys.contains(teams[i].code))
+        label += "  (picture)";
+      const bool selected = static_cast<int>(i) == m_jersey_team;
+      if (ImGui::Selectable(label.c_str(), selected))
+        m_jersey_team = static_cast<int>(i);
+      LogItemRect("jersey-team", teams[i].code);
+      if (selected)
+        ImGui::SetItemDefaultFocus();
+    }
+    ImGui::EndCombo();
+  }
+  LogItemRect("widget", "jersey-team");
+
+  const auto current = cfg.jerseys.find(team.code);
+  const bool has_picture = current != cfg.jerseys.end();
+  if (has_picture)
+    ImGui::TextWrapped("Picture: %s", current->second.c_str());
+  else
+    ImGui::TextDisabled("No picture: the team's own uniform.");
+
+  ImGui::BeginDisabled(busy);
+  if (ImGui::Button("Choose picture...")) {
+    m_jersey_pick_team = team.code;
+    m_jersey_pick = std::async(std::launch::async, [] {
+      JerseyPick pick;
+      pick.path = jersey::PickImage(&pick.error);
+      return pick;
+    });
+    SetStatus("choose a picture in the file dialog (in fullscreen it can open "
+              "behind the game)");
+  }
+  LogItemRect("widget", "jersey-choose");
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!has_picture);
+  if (ImGui::Button("Remove picture"))
+    StartJerseyRemove(team.code);
+  LogItemRect("widget", "jersey-remove");
+  ImGui::EndDisabled();
+
+  ImGui::Spacing();
+  ImGui::TextDisabled("Or type the picture's full path and press Enter:");
+  const char *use_label = "Use this file";
+  ImGui::SetNextItemWidth(-(ImGui::CalcTextSize(use_label).x +
+                            ImGui::GetStyle().FramePadding.x * 2.0f +
+                            ImGui::GetStyle().ItemSpacing.x));
+  const bool entered =
+      ImGui::InputText("##jersey-path", m_jersey_path.data(), m_jersey_path.size(),
+                       ImGuiInputTextFlags_EnterReturnsTrue);
+  LogItemRect("widget", "jersey-path");
+  ImGui::SameLine();
+  const bool use_clicked = ImGui::Button(use_label);
+  LogItemRect("widget", "jersey-use-path");
+  if ((entered || use_clicked) && m_jersey_path[0] != '\0')
+    StartJerseyBuild({{team.code, std::string(m_jersey_path.data())}});
+
+  ImGui::Spacing();
+  ImGui::Separator();
+  ImGui::TextDisabled("Where the picture goes (every team)");
+  bool placement_changed = ImGui::Checkbox("Front of the top", &cfg.jersey_front);
+  LogItemRect("widget", "jersey-front");
+  ImGui::SameLine();
+  placement_changed |= ImGui::Checkbox("Back of the top", &cfg.jersey_back);
+  LogItemRect("widget", "jersey-back");
+  ImGui::EndDisabled();
+  if (placement_changed) {
+    Save("config");
+    std::vector<std::pair<std::string, std::string>> all(cfg.jerseys.begin(),
+                                                         cfg.jerseys.end());
+    StartJerseyBuild(std::move(all));
+  }
+  if (busy)
+    ImGui::TextDisabled("Working...");
+
+  ImGui::Spacing();
+  Description("PNG, JPEG, BMP or GIF. A logo with a transparent background "
+              "looks best; a photo shows as a patch. The picture is drawn onto "
+              "the team's own uniform from your game files, so both players of "
+              "that team wear it in every mode, including the COM team. It "
+              "turns on the HD texture loader while any team has a picture. "
+              "Applies when the game is running (close this menu to see it).");
+}
+
 void ConfigMenu::DrawCheatsTab() {
   ConfigResult &cfg = *m_hooks.config;
   const std::string &id = m_hooks.disc_id;
@@ -2729,6 +2984,8 @@ void ConfigMenu::DrawTexturesTab() {
   LogItemRect("widget", "hires");
   Description("Replaces the disc's own textures with higher-resolution packs "
               "found in the folder below. Applies immediately.");
+  if (!cfg.hires_textures && !cfg.jerseys.empty())
+    ImGui::TextDisabled("The loader stays on for your team jerseys (Jersey tab).");
 
   ImGui::BeginDisabled(!cfg.hires_textures);
   if (ImGui::Checkbox("Cache decoded textures in RAM",

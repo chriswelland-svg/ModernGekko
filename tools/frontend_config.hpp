@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <span>
 #include <string>
 #include <string_view>
@@ -73,6 +74,12 @@ struct ConfigResult {
   // [Gameplay] Beach Spikers (USA): grey ball landing marker when both players
   // on the receiving team are human (see moderngekko/game_tweaks.hpp).
   bool neutral_ball_marker = false;
+  // Team jerseys (F1 > Jersey): team code ("USA") -> the player's image file.
+  // The generated textures live in the HD texture folder; this records what
+  // they were made from, so they can be rebuilt.
+  std::map<std::string, std::string> jerseys;
+  bool jersey_front = true;
+  bool jersey_back = true;
   std::string netplay_nickname = "Player";
   std::string netplay_address = "127.0.0.1";
   std::uint16_t netplay_port = 2626;
