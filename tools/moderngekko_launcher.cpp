@@ -930,7 +930,8 @@ bool BuildModuleFromDisc(const fs::path& port_tool, const fs::path& game_root,
                          const fs::path& work_dir, const fs::path& final_path,
                          const fs::path& log_path, bool bundled_toolchain,
                          const std::string& compiler, const std::string& ninja,
-                         const std::string& python, std::string* error)
+                         const std::string& python, const std::string& cmake,
+                         std::string* error)
 {
   std::error_code ec;
   fs::create_directories(work_dir, ec);
@@ -974,6 +975,11 @@ bool BuildModuleFromDisc(const fs::path& port_tool, const fs::path& game_root,
     storage.emplace_back("--python");
     storage.emplace_back(python);
   }
+  if (!cmake.empty())
+  {
+    storage.emplace_back("--cmake");
+    storage.emplace_back(cmake);
+  }
   if (!compiler.empty())
   {
     storage.emplace_back("--compiler");
@@ -998,8 +1004,20 @@ bool BuildModuleFromDisc(const fs::path& port_tool, const fs::path& game_root,
   SDL_SetNumberProperty(properties, SDL_PROP_PROCESS_CREATE_STDOUT_NUMBER, SDL_PROCESS_STDIO_REDIRECT);
   SDL_SetPointerProperty(properties, SDL_PROP_PROCESS_CREATE_STDOUT_POINTER, log);
   SDL_SetBooleanProperty(properties, SDL_PROP_PROCESS_CREATE_STDERR_TO_STDOUT_BOOLEAN, true);
+  // Give the port the environment as it is *now*. Without this SDL uses
+  // SDL_GetEnvironment(), a copy taken when the launcher started that ignores
+  // later SetEnvironmentVariable/setenv calls -- so the Toolchain directories
+  // UseBundledToolchain() put on PATH never reached the port or anything it
+  // spawns. That, not _putenv_s, is why bundled tools kept going missing.
+  // SDL copies the variables before it returns, so the snapshot can go
+  // straight away.
+  SDL_Environment* environment = SDL_CreateEnvironment(true);
+  if (environment)
+    SDL_SetPointerProperty(properties, SDL_PROP_PROCESS_CREATE_ENVIRONMENT_POINTER, environment);
   SDL_Process* process = SDL_CreateProcessWithProperties(properties);
   SDL_DestroyProperties(properties);
+  if (environment)
+    SDL_DestroyEnvironment(environment);
   SDL_CloseIO(log);
   if (!process)
   {
@@ -1550,6 +1568,26 @@ int main(int argc, char** argv)
       break;
     }
     LauncherLog("module build ninja: %s", ninja_path.empty() ? "none" : ninja_path.c_str());
+  }
+
+  // CMake, same reasoning again. The Windows package ships it in
+  // Toolchain/cmake/bin; left to PATH, a player without their own CMake hit
+  // "failed to launch command: Windows error 2" right after dolrecomp.
+  std::string cmake_path;
+  {
+#if defined(_WIN32)
+    const fs::path bundled_cmake = exe_dir / "Toolchain" / "cmake" / "bin" / "cmake.exe";
+#else
+    const fs::path bundled_cmake = exe_dir / "Toolchain" / "cmake" / "bin" / "cmake";
+#endif
+    std::error_code bundled_error;
+    if (fs::is_regular_file(bundled_cmake, bundled_error))
+      cmake_path = bundled_cmake.string();
+    else if (const fs::path sibling = SiblingTool(argv[0], "cmake"); !sibling.empty())
+      cmake_path = sibling.string();
+    // Otherwise leave it empty: the port then looks for its own bundled copy
+    // and finally falls back to `cmake` on PATH.
+    LauncherLog("module build cmake: %s", cmake_path.empty() ? "PATH" : cmake_path.c_str());
   }
 
   // Python: the module template generates its ABI tables with a Python script,
@@ -2379,7 +2417,7 @@ int main(int argc, char** argv)
                 std::string error;
                 const bool ok = BuildModuleFromDisc(port_tool, current_game, work_dir, output,
                                                     log_path, bundled, compiler_path,
-                                                    ninja_path, python_path, &error);
+                                                    ninja_path, python_path, cmake_path, &error);
                 build_error = std::move(error);
                 build_ok.store(ok);
                 build_done.store(true);
@@ -2422,7 +2460,7 @@ int main(int argc, char** argv)
                   std::string error;
                   const bool ok = BuildModuleFromDisc(port_tool, current_game, work_dir, output,
                                                       log_path, bundled, compiler_path,
-                                                      ninja_path, python_path, &error);
+                                                      ninja_path, python_path, cmake_path, &error);
                   build_error = std::move(error);
                   build_ok.store(ok);
                   build_done.store(true);

@@ -481,6 +481,25 @@ fs::path SiblingExecutable(const char* argv0, std::string name)
   return fs::is_regular_file(sibling) ? sibling : fs::path(std::move(name));
 }
 
+// The CMake command to run, already quoted for RunCommand. An explicit
+// --cmake wins; otherwise a packaged Toolchain/cmake beside this executable,
+// so `moderngekko-port build` run straight from an unpacked Windows release
+// works on a machine with no CMake installed; otherwise PATH.
+std::string ResolveCMake(const char* argv0, const std::string& requested)
+{
+  if (!requested.empty())
+    return Quote(fs::path(requested));
+  std::error_code ec;
+  fs::path bundled =
+      fs::weakly_canonical(argv0, ec).parent_path() / "Toolchain" / "cmake" / "bin" / "cmake";
+#if defined(_WIN32)
+  bundled += ".exe";
+#endif
+  if (fs::is_regular_file(bundled, ec))
+    return Quote(bundled);
+  return "cmake";
+}
+
 // Where the sources the module build needs live.
 //
 // A packaged release cannot use the compile-time source tree: a shipped
@@ -1030,7 +1049,11 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
       options.ninja.empty() ? std::string() : ShortPathForWindows(options.ninja);
   const std::string cmake_python =
       options.python.empty() ? std::string() : ShortPathForWindows(options.python);
-  std::string configure = "cmake -E env CMAKE_NINJA_FORCE_RESPONSE_FILE=1 cmake -S " +
+  // CMake by path when one is known: --cmake, else the packaged copy beside
+  // this executable, else PATH. Launched directly (CreateProcess, no cmd.exe),
+  // so plain quoting is enough for a path with spaces or parentheses.
+  const std::string cmake = ResolveCMake(argv0, options.cmake);
+  std::string configure = cmake + " -E env CMAKE_NINJA_FORCE_RESPONSE_FILE=1 " + cmake + " -S " +
       Quote(source_root / "module-template") +
       " -B " + Quote(module_build) + " -G Ninja -DCMAKE_BUILD_TYPE=Release" +
       // Quoted: a Windows install path routinely contains spaces and
@@ -1057,7 +1080,7 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
     configure += " -DCMAKE_C_FLAGS=" + QuoteText(pgo_compile_flags) +
                  " -DCMAKE_SHARED_LINKER_FLAGS=" + QuoteText(pgo_compile_flags);
   if (!RunCommand(configure) ||
-      !RunCommand("cmake --build " + Quote(module_build) + " -j" +
+      !RunCommand(cmake + " --build " + Quote(module_build) + " -j" +
                   std::to_string(compile_jobs)))
     return std::nullopt;
 

@@ -128,6 +128,28 @@ void TestValidation()
       Parse({"moderngekko-port", "build", "game"}, "llvm");
   Check(llvm_default.build.backend == "llvm", "the build's default backend was not honoured");
 }
+
+// The launcher pins every tool the module build runs. CMake was the one left
+// to PATH, which a packaged Windows build cannot rely on.
+void TestPinnedTools()
+{
+  const port::CommandLine pinned = Parse(
+      {"moderngekko-port", "build", "game", "--ninja", "C:/pkg/Toolchain/bin/ninja.exe",
+       "--python", "C:/pkg/Toolchain/python/python.exe", "--cmake",
+       "C:/New folder/Toolchain/cmake/bin/cmake.exe", "--compiler",
+       "C:/pkg/Toolchain/mingw/bin/clang.exe"});
+  Check(static_cast<bool>(pinned), "pinned tools failed to parse: " + pinned.error);
+  Check(pinned.build.ninja == "C:/pkg/Toolchain/bin/ninja.exe", "--ninja misparsed");
+  Check(pinned.build.python == "C:/pkg/Toolchain/python/python.exe", "--python misparsed");
+  Check(pinned.build.cmake == "C:/New folder/Toolchain/cmake/bin/cmake.exe",
+        "--cmake misparsed");
+  Check(pinned.build.compiler == "C:/pkg/Toolchain/mingw/bin/clang.exe", "--compiler misparsed");
+
+  Check(Parse({"moderngekko-port", "build", "game"}).build.cmake.empty(),
+        "cmake was pinned without --cmake");
+  Check(!Parse({"moderngekko-port", "build", "game", "--cmake"}),
+        "build accepted --cmake with no value");
+}
 }  // namespace
 
 int main()
@@ -136,5 +158,6 @@ int main()
   TestSeparatorStopsOptionParsing();
   TestPgoRun();
   TestValidation();
+  TestPinnedTools();
   return g_failures == 0 ? 0 : 1;
 }

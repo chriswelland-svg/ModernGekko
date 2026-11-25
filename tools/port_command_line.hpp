@@ -29,6 +29,12 @@ struct BuildOptions
   // Python3_EXECUTABLE for the same reason ninja is pinned: a packaged Python
   // has to be reachable without relying on PATH surviving into a grandchild.
   std::string python;
+  // CMake itself, pinned for the same reason. The port runs it for configure
+  // and build; by bare name it was the one tool still left to PATH, and a
+  // player with no CMake of their own got "failed to launch command: Windows
+  // error 2" (file not found) even though the package ships
+  // Toolchain/cmake/bin/cmake.exe.
+  std::string cmake;
   std::string opt_level;
   std::string backend;
   bool state_in_memory = false;
@@ -104,6 +110,8 @@ inline CommandLine ParseCommandLine(int argc, const char* const* argv,
       parsed.build.ninja = argv[++i];
     else if (argument == "--python" && i + 1 < argc)
       parsed.build.python = argv[++i];
+    else if (argument == "--cmake" && i + 1 < argc)
+      parsed.build.cmake = argv[++i];
     else if (argument == "--backend" && i + 1 < argc)
       parsed.build.backend = argv[++i];
     else if (argument == "--state-in-memory")
