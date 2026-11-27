@@ -75,20 +75,28 @@ Workspace DeriveWorkspace(const fs::path& profile_dir, const fs::path& output,
   return workspace;
 }
 
-std::size_t LongestModuleObjectPathLength(const fs::path& cache_root, std::string_view disc_id)
+std::size_t LongestModuleObjectPathLength(const fs::path& cache_root, std::string_view disc_id,
+                                          std::size_t cache_key_length)
 {
-  constexpr std::size_t CACHE_KEY = 64 + 1 + 16;
   constexpr std::size_t CMAKE_DIRECTORY_HASH = 32;
   constexpr std::size_t LONGEST_OBJECT_NAME = std::string_view("chunk_0000_text1_80000000.c.obj.rsp").size();
+  // CMake's compiler check runs before any chunk is compiled. On the machine
+  // that first hit this, the directory below measured 254 characters.
+  constexpr std::size_t TRY_COMPILE_TAIL =
+      std::string_view("/CMakeFiles/CMakeScratch/TryCompile-xxxxxx/CMakeFiles/cmTC_xxxxx.dir/"
+                       "CMakeCCompilerABI.c.obj.rsp")
+          .size();
 
-  std::size_t length = PathText(cache_root).size();
-  length += 1 + disc_id.size();                                 // /<disc>
-  length += 1 + CACHE_KEY;                                      // /<key>
-  length += std::string_view("/module-build/CMakeFiles/").size();
-  length += 1 + disc_id.size() + std::string_view("_recomp.dir").size();  // g<disc>_recomp.dir
-  length += 1 + CMAKE_DIRECTORY_HASH;
-  length += 1 + LONGEST_OBJECT_NAME;
-  return length;
+  std::size_t module_build = PathText(cache_root).size();
+  module_build += 1 + disc_id.size();                           // /<disc>
+  module_build += 1 + cache_key_length;                         // /<key>
+  module_build += std::string_view("/module-build").size();
+
+  std::size_t chunk = module_build + std::string_view("/CMakeFiles/").size();
+  chunk += 1 + disc_id.size() + std::string_view("_recomp.dir").size();  // g<disc>_recomp.dir
+  chunk += 1 + CMAKE_DIRECTORY_HASH;
+  chunk += 1 + LONGEST_OBJECT_NAME;
+  return std::max(chunk, module_build + TRY_COMPILE_TAIL);
 }
 
 std::string PathText(const fs::path& path)

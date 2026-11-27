@@ -42,7 +42,25 @@ Workspace DeriveWorkspace(const fs::path& profile_dir, const fs::path& output,
 
 inline constexpr std::size_t WINDOWS_PATH_LIMIT = 260;
 
-std::size_t LongestModuleObjectPathLength(const fs::path& cache_root, std::string_view disc_id);
+// The per-build cache directory under <output>/<disc>/. Linux and macOS keep
+// the descriptive "<dol sha256>-<16 hex identity>" name. Windows uses a 16-hex
+// digest of both: the 81-character name alone pushed CMake's first compiler
+// check (module-build/CMakeFiles/CMakeScratch/TryCompile-*/...) past MAX_PATH
+// under C:\Users\<name>\AppData\Local for every user, and ninja then could not
+// create its response file ("WriteFile(...rsp): Unable to create file").
+inline constexpr std::size_t FULL_CACHE_KEY_LENGTH = 64 + 1 + 16;
+inline constexpr std::size_t SHORT_CACHE_KEY_LENGTH = 16;
+#if defined(_WIN32)
+inline constexpr std::size_t CACHE_KEY_LENGTH = SHORT_CACHE_KEY_LENGTH;
+#else
+inline constexpr std::size_t CACHE_KEY_LENGTH = FULL_CACHE_KEY_LENGTH;
+#endif
+
+// The longest file the module build creates under cache_root: a chunk's ninja
+// response file, or the response file of CMake's compiler check, whichever is
+// longer.
+std::size_t LongestModuleObjectPathLength(const fs::path& cache_root, std::string_view disc_id,
+                                          std::size_t cache_key_length = CACHE_KEY_LENGTH);
 
 std::string PathText(const fs::path& path);
 

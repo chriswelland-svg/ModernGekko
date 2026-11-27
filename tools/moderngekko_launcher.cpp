@@ -926,6 +926,45 @@ fs::path BundledCompiler(const fs::path& install_dir)
   return {};
 }
 
+// The lines of a failed build log worth showing in the dialog: the first few
+// that report an error, else the last few. "see module-build.log" alone left
+// players with nothing to act on or report.
+std::string BuildLogHighlights(const fs::path& log_path)
+{
+  constexpr std::size_t MAX_LINES = 6;
+  constexpr std::size_t MAX_WIDTH = 220;
+  std::ifstream log(log_path);
+  std::vector<std::string> errors;
+  std::vector<std::string> tail;
+  std::string line;
+  while (std::getline(log, line))
+  {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+      line.pop_back();
+    const auto first = line.find_first_not_of(' ');
+    if (first == std::string::npos || line.starts_with("+ "))
+      continue;
+    line.erase(0, first);
+    if (line.size() > MAX_WIDTH)
+      line = line.substr(0, MAX_WIDTH) + "...";
+    std::string lower = line;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (errors.size() < MAX_LINES &&
+        (lower.find("error") != std::string::npos ||
+         lower.find("would need paths of up to") != std::string::npos))
+      errors.push_back(line);
+    tail.push_back(line);
+    if (tail.size() > MAX_LINES)
+      tail.erase(tail.begin());
+  }
+  const std::vector<std::string>& chosen = errors.empty() ? tail : errors;
+  std::string text;
+  for (const std::string& entry : chosen)
+    text += "\n" + entry;
+  return text;
+}
+
 bool BuildModuleFromDisc(const fs::path& port_tool, const fs::path& game_root,
                          const fs::path& work_dir, const fs::path& final_path,
                          const fs::path& log_path, bool bundled_toolchain,
@@ -1030,6 +1069,8 @@ bool BuildModuleFromDisc(const fs::path& port_tool, const fs::path& game_root,
   if (!waited || exit_code != 0)
   {
     *error = "the module build failed; see " + log_path.string();
+    if (const std::string highlights = BuildLogHighlights(log_path); !highlights.empty())
+      *error += "\n" + highlights;
     return false;
   }
 

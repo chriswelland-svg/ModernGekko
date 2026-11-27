@@ -431,7 +431,9 @@ std::string ReadCommand(const std::string& command)
 
 int RunCommandStatus(const std::string& command)
 {
-  std::cout << "+ " << command << '\n';
+  // Flushed so the command line lands in the build log before the child's own
+  // output, not after everything the child printed.
+  std::cout << "+ " << command << std::endl;
 #if defined(_WIN32)
   std::wstring wide = Widen(command);
   std::vector<wchar_t> command_line(wide.begin(), wide.end());
@@ -878,8 +880,18 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
       *dolrecomp_hash + "|" + moderngekko::pgo::PgoCacheIdentity(options.pgo) +
       DolRecompCodegenIdentity() + "|chain_calls=" + chain_calls + "|" + prune.identity;
   std::ostringstream key_tail;
+#if defined(_WIN32)
+  // One 16-digit digest of the DOL hash and the identity: the descriptive
+  // "<sha256>-<identity>" name is 81 characters, and with it the module build
+  // under %LOCALAPPDATA% ran past MAX_PATH for every user (see
+  // pgo::CACHE_KEY_LENGTH). manifest.txt still records the full DOL hash.
+  key_tail << std::hex << std::setfill('0') << std::setw(16)
+           << Fnv1a(game.dol_sha256 + "|" + identity);
+  const std::string cache_key = key_tail.str();
+#else
   key_tail << std::hex << std::setfill('0') << std::setw(16) << Fnv1a(identity);
   const std::string cache_key = game.dol_sha256 + "-" + key_tail.str();
+#endif
   const fs::path artifact = options.output / game.disc_id / cache_key;
   const fs::path module = artifact / ("g" + game.disc_id + "_recomp" + Suffix());
   const fs::path module_build = artifact / "module-build";
@@ -923,6 +935,24 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   };
   if (fs::is_regular_file(built))
     return publish_module();
+
+#if defined(_WIN32)
+  // Say so up front. Past MAX_PATH the first symptom is CMake calling a working
+  // compiler "broken", because ninja cannot create the response file of its
+  // test compile -- which reads like a toolchain problem, not a path one.
+  if (const std::size_t longest =
+          moderngekko::pgo::LongestModuleObjectPathLength(options.output, game.disc_id);
+      longest > moderngekko::pgo::WINDOWS_PATH_LIMIT)
+  {
+    std::cerr << "the module build under " << Text(options.output)
+              << " would need paths of up to " << longest
+              << " characters, and Windows refuses to create a file past "
+              << moderngekko::pgo::WINDOWS_PATH_LIMIT << ".\n"
+              << "Use a shorter --output folder, or turn on long paths in Windows "
+                 "(LongPathsEnabled).\n";
+    return std::nullopt;
+  }
+#endif
 
   fs::create_directories(artifact);
   fs::path recomp_dol = game.main_dol;
@@ -1075,7 +1105,11 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
            ? std::string()
            : " -DRECOMPCORE_MODULE_OPT_LEVEL=" + options.opt_level) +
       " -DCHASSIS_ABI_DIR=" +
-      Quote(source_root / "Source/Core/Core/PowerPC/StaticRecomp");
+      Quote(source_root / "Source/Core/Core/PowerPC/StaticRecomp") +
+      // --no-lto used to reach only the cache identity ("link:no-lto"); the
+      // template still turned IPO on by default, so the Windows launcher got
+      // the ThinLTO link it passes --no-lto to avoid.
+      (options.no_lto ? std::string(" -DRECOMPCORE_MODULE_ENABLE_IPO=OFF") : std::string());
   if (!pgo_compile_flags.empty())
     configure += " -DCMAKE_C_FLAGS=" + QuoteText(pgo_compile_flags) +
                  " -DCMAKE_SHARED_LINKER_FLAGS=" + QuoteText(pgo_compile_flags);

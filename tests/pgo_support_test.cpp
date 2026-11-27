@@ -157,6 +157,44 @@ void TestModuleObjectPathLength()
         "the estimate changed for an equally long disc ID");
 }
 
+// The launcher's module build on a player's PC: the full cache directory name
+// put CMake's compiler check past MAX_PATH ("WriteFile(...rsp): Unable to
+// create file"), and the chunks would have followed.
+void TestModuleBuildFitsUnderUserProfile()
+{
+  const fs::path player =
+      "C:/Users/Brittany and Michael/AppData/Local/moderngekko/StaticRecompModules/build";
+  const std::size_t full =
+      pgo::LongestModuleObjectPathLength(player, "GBSE8P", pgo::FULL_CACHE_KEY_LENGTH);
+  Check(full == 282, "the failing build's longest path is not 282 characters (" +
+                         std::to_string(full) + ")");
+  Check(full > pgo::WINDOWS_PATH_LIMIT, "the path that really failed is not reported as too long");
+
+  // 254 characters is what CMake reported for that compiler check's object
+  // directory; its response file name adds the rest.
+  const std::size_t try_compile = std::string_view(
+      "C:/Users/Brittany and Michael/AppData/Local/moderngekko/StaticRecompModules/build/GBSE8P/"
+      "b334c1f19aa10a218775f21e2b5d1f59cc2a925e17dd43d31e4db6183781e6a6-95ecebd3ed265ac3/"
+      "module-build/CMakeFiles/CMakeScratch/TryCompile-q7ya5m/CMakeFiles/cmTC_9bf9e.dir/"
+      "CMakeCCompilerABI.c.obj.rsp").size();
+  Check(full >= try_compile, "the estimate is shorter than the compiler check that failed (" +
+                                 std::to_string(full) + " < " + std::to_string(try_compile) + ")");
+
+  const std::size_t fixed =
+      pgo::LongestModuleObjectPathLength(player, "GBSE8P", pgo::SHORT_CACHE_KEY_LENGTH);
+  Check(fixed <= pgo::WINDOWS_PATH_LIMIT,
+        "the short cache key still does not fit (" + std::to_string(fixed) + ")");
+
+  // Headroom for long profile folder names, e.g. a 20-character account name
+  // with a ".DESKTOP-XXXXXXX" suffix after a profile clash.
+  const fs::path longest_profile = "C:/Users/abcdefghijklmnopqrst.DESKTOP-ABCDEFG/AppData/Local/"
+                                   "moderngekko/StaticRecompModules/build";
+  Check(pgo::LongestModuleObjectPathLength(longest_profile, "GBSE8P",
+                                           pgo::SHORT_CACHE_KEY_LENGTH) <=
+            pgo::WINDOWS_PATH_LIMIT,
+        "a long but ordinary profile folder does not fit");
+}
+
 void TestManifest()
 {
   auto options = UseOptions("/profiles/merged.profdata", "0123456789abcdef");
@@ -289,6 +327,7 @@ int main()
   TestVersionParsing();
   TestWorkspace();
   TestModuleObjectPathLength();
+  TestModuleBuildFitsUnderUserProfile();
   TestManifest();
   TestProfdataCandidates();
   TestPathFormatting();
